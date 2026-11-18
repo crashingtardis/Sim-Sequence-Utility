@@ -3,7 +3,7 @@ studio_app.py — Entry point for the Comau Sim-Sequence Studio desktop app.
 
 Usage:
     python studio_app.py
-    python studio_app.py inputs/honda_weld_sequence.cseq
+    python studio_app.py inputs/sample_weld_sequence.cseq
 """
 
 from __future__ import annotations

@@ -7,7 +7,7 @@ import pytest
 import openpyxl
 from openpyxl import Workbook
 
-from sim_sequence.excel_loader import load_excel
+from sim_sequence.excel_loader import load_excel, load_timing_matrix_excel
 
 
 # ---------------------------------------------------------------------------
@@ -53,50 +53,43 @@ def _make_workbook(tmp_path: Path,
 # Happy-path tests
 # ---------------------------------------------------------------------------
 
-def test_basic_load(tmp_path):
-    path  = _make_workbook(tmp_path)
+def test_load_excel_happy_path(tmp_path):
+    path = _make_workbook(tmp_path)
     model = load_excel(path)
 
-    assert model.settings.available_time == 3600
-    assert model.settings.takt_time      == 60
-    assert model.settings.time_increment == 1
+    assert model.settings.available_time == 3600.0
+    assert model.settings.takt_time == 60.0
+    assert model.settings.time_increment == 1.0
+
     assert len(model.resources) == 1
     assert model.resources[0].id == "Operator_1"
+    assert model.resources[0].color == "#1F4E78"
+
     assert len(model.tasks) == 1
     assert model.tasks[0].id == "T1"
     assert model.tasks[0].duration == 5.0
+    assert model.tasks[0].predecessors_fs == []
+    assert model.tasks[0].predecessors_ss == []
 
 
-def test_predecessors_parsed(tmp_path):
+def test_load_excel_predecessors(tmp_path):
     tasks = [
-        ("A", "Task A", "Operator_1", 5,  "",     ""),
-        ("B", "Task B", "Operator_1", 3,  "A",    ""),
-        ("C", "Task C", "Operator_1", 2,  "A, B", "A"),
+        ("T1", "Task 1", "Operator_1", 4, "", ""),
+        ("T2", "Task 2", "Operator_1", 5, "T1", ""),
+        ("T3", "Task 3", "Operator_1", 2, "T1, T2", "T1"),
     ]
-    model = load_excel(_make_workbook(tmp_path, tasks=tasks))
+    path = _make_workbook(tmp_path, tasks=tasks)
+    model = load_excel(path)
 
-    b = model.task_by_id("B")
-    assert b.predecessors_fs == ["A"]
-    assert b.predecessors_ss == []
-
-    c = model.task_by_id("C")
-    assert c.predecessors_fs == ["A", "B"]
-    assert c.predecessors_ss == ["A"]
+    assert model.tasks[1].predecessors_fs == ["T1"]
+    assert model.tasks[2].predecessors_fs == ["T1", "T2"]
+    assert model.tasks[2].predecessors_ss == ["T1"]
 
 
-def test_blank_rows_skipped(tmp_path):
+def test_load_excel_skips_blank_and_comment_rows(tmp_path):
     tasks = [
-        ("T1", "Task 1", "Operator_1", 5, "", ""),
-        (None, None, None, None, None, None),   # blank row — should be skipped
-        ("T2", "Task 2", "Operator_1", 3, "T1", ""),
-    ]
-    model = load_excel(_make_workbook(tmp_path, tasks=tasks))
-    assert len(model.tasks) == 2
-
-
-def test_comment_rows_skipped(tmp_path):
-    tasks = [
-        ("# This is a comment", "", "", "", "", ""),
+        ("#comment", "comment", "Operator_1", 0, "", ""),
+        (None, None, None, None, None, None),
         ("T1", "Task 1", "Operator_1", 5, "", ""),
     ]
     model = load_excel(_make_workbook(tmp_path, tasks=tasks))
@@ -133,37 +126,49 @@ def test_missing_setting_key_raises(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Honda sequence sheet tests
+# Legacy timing matrix sheet tests
 # ---------------------------------------------------------------------------
 
-def test_load_honda_excel_direct():
-    from sim_sequence.excel_loader import load_honda_excel, get_honda_sample_path
-    sample_path = get_honda_sample_path()
-    assert sample_path.exists()
+def test_load_timing_matrix_excel(tmp_path):
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Sheet1"
 
-    model = load_honda_excel(sample_path)
-    assert len(model.resources) == 6
-    assert len(model.tasks) == 22
+    # Header at row 12
+    ws.cell(12, 4, "resource")
+    ws.cell(12, 5, "start int")
+    ws.cell(12, 7, " task description")
+    ws.cell(12, 20, "time")
+    ws.cell(12, 23, "end int")
 
-    res_names = {r.id for r in model.resources}
-    assert "operator 1" in res_names
-    assert "rbt 1 (geo weld)" in res_names
-    assert "unload conv" in res_names
+    # Row 13: Operator 1 task 1
+    ws.cell(13, 2, "a")
+    ws.cell(13, 3, 1)
+    ws.cell(13, 4, "Operator 1")
+    ws.cell(13, 5, "n/a")
+    ws.cell(13, 7, "Load part")
+    ws.cell(13, 20, 5)
+    ws.cell(13, 23, "a1")
 
-    task_map = {t.id: t for t in model.tasks}
-    assert "a1" in task_map
-    assert "b1" in task_map
-    assert "b1" in task_map
-    assert task_map["b1"].predecessors_fs == ["a1"]
-    assert "c3" in task_map
-    assert "d4" in task_map["b2"].predecessors_fs
+    # Row 14: Geo Tool 1 task 1
+    ws.cell(14, 2, "b")
+    ws.cell(14, 3, 1)
+    ws.cell(14, 4, "Geo Tool 1")
+    ws.cell(14, 5, "a1")
+    ws.cell(14, 7, "Clamp part")
+    ws.cell(14, 20, 2)
+    ws.cell(14, 23, "b1")
 
+    path = tmp_path / "timing_matrix.xlsx"
+    wb.save(str(path))
 
-def test_load_honda_excel_auto_dispatch():
-    from sim_sequence.excel_loader import load_excel, get_honda_sample_path
-    sample_path = get_honda_sample_path()
-    # load_excel automatically detects Honda format without Settings sheet
-    model = load_excel(sample_path)
-    assert len(model.tasks) == 22
-    assert len(model.resources) == 6
+    # Test direct load
+    model = load_timing_matrix_excel(path)
+    assert len(model.resources) == 2
+    assert len(model.tasks) == 2
+    assert model.tasks[1].predecessors_fs == ["a1"]
 
+    # Test auto-dispatch load
+    model_auto = load_excel(path)
+    assert len(model_auto.tasks) == 2
+    assert model_auto.tasks[0].id == "a1"

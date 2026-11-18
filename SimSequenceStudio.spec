@@ -7,8 +7,7 @@ a = Analysis(
     binaries=[],
     datas=[
         ('D:/Users/moroa/Code/Sim-Sequence-Utility/resources/Logo-COMAU.png', 'resources'),
-        ('D:/Users/moroa/Code/Sim-Sequence-Utility/inputs/honda_weld_sequence.cseq', 'inputs'),
-        ('D:/Users/moroa/Code/Sim-Sequence-Utility/inputs/honda_seq_dev_111826.xlsx', 'inputs'),
+        ('D:/Users/moroa/Code/Sim-Sequence-Utility/inputs/sample_weld_sequence.cseq', 'inputs'),
     ],
     hiddenimports=['PyQt6.sip', 'networkx.algorithms', 'networkx.classes', 'networkx.generators', 'yaml'],
     hookspath=[],

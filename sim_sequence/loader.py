@@ -7,7 +7,7 @@ Expected YAML shape (see inputs/example_sequence.yaml for a full sample):
       available_time: 3600
       takt_time: 60
       time_increment: 1
-      output_file: honda_seq_dev_111826.xlsx
+      output_file: sequence_report.xlsx
 
     resources:
       - id: Operator_1

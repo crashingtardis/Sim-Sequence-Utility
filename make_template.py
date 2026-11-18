@@ -52,7 +52,7 @@ EXAMPLE_SETTINGS = [
     ("available_time", 3600,   "Total time budget (seconds)"),
     ("takt_time",      60,     "Target cycle time / line rate (seconds)"),
     ("time_increment", 1,      "Grid column resolution on granular sheets (seconds)"),
-    ("output_file",    "outputs/honda_seq_dev_111826.xlsx", "Path for the generated report"),
+    ("output_file",    "outputs/sequence_report.xlsx", "Path for the generated report"),
 ]
 
 EXAMPLE_RESOURCES = [

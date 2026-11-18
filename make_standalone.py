@@ -297,7 +297,7 @@ EXAMPLE_SETTINGS = [
     ("available_time", 3600,  "seconds", "Total shift/cycle time budget"),
     ("takt_time",      60,    "seconds", "Target line rate / takt cycle budget"),
     ("time_increment", 1,     "seconds", "Time scale resolution on granular resource grids"),
-    ("output_file",    "outputs/honda_seq_dev_111826.xlsx", "path", "Optional backup report path"),
+    ("output_file",    "outputs/sequence_report.xlsx", "path", "Optional backup report path"),
 ]
 
 EXAMPLE_RESOURCES = [
@@ -409,7 +409,7 @@ def _sheet_settings(wb: Workbook, blank: bool) -> None:
         ("available_time", 3600, "seconds", "Total shift/cycle time budget"),
         ("takt_time",      60,   "seconds", "Target line rate / takt cycle budget"),
         ("time_increment", 1,    "seconds", "Time scale resolution on granular resource grids"),
-        ("output_file",    "outputs/honda_seq_dev_111826.xlsx", "path", "Optional backup report path"),
+        ("output_file",    "outputs/sequence_report.xlsx", "path", "Optional backup report path"),
     ]
 
     for r, (key, val, unit, desc) in enumerate(rows, start=7):

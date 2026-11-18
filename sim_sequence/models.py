@@ -16,7 +16,7 @@ class GlobalSettings:
     available_time: float          # seconds (or whatever unit the user chooses)
     takt_time: float               # seconds per cycle (line rate)
     time_increment: float = 1.0   # column resolution on granular sheets (e.g. 0.1 or 1)
-    output_file: str = "honda_seq_dev_111826.xlsx"
+    output_file: str = "outputs/sequence_report.xlsx"
 
 
 @dataclass

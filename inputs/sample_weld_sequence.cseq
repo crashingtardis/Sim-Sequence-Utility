@@ -5,7 +5,7 @@
     "available_time": 3600,
     "takt_time": 60,
     "time_increment": 1,
-    "output_file": "outputs/honda_seq_dev_111826.xlsx"
+    "output_file": "outputs/sequence_report.xlsx"
   },
   "resources": [
     {

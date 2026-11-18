@@ -3,7 +3,7 @@
 ## Project Overview
 Develop a Python-based utility that allows for the easy creation of automation sequences, outputting an interactive Excel document. The tool will calculate task timings based on user-defined inputs, dependencies, and interlocks, and visualize them using a combination of a macro-level Gantt chart and micro-level conditionally formatted grids.
 
-**Target Output File:** `honda_seq_dev_111826.xlsx`
+**Target Output File:** `sequence_report.xlsx`
 
 ## Core Technologies
 *   **Language:** Python
@@ -49,7 +49,7 @@ Treat every sub-task as a node in a graph.
 import xlsxwriter
 
 # Setup
-workbook = xlsxwriter.Workbook("honda_seq_dev_111826.xlsx")
+workbook = xlsxwriter.Workbook("sequence_report.xlsx")
 summary_sheet = workbook.add_worksheet("Overall_Sequence")
 header_format = workbook.add_format({'bold': True, 'bg_color': '#D3D3D3', 'border': 1})
 link_format = workbook.add_format({'font_color': 'blue', 'underline': 1})

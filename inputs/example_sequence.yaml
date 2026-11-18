@@ -1,11 +1,11 @@
-# Sim-Sequence Utility — Honda body-shop weld sequence example
+# Sim-Sequence Utility — Automotive body-shop weld sequence sample
 # Copy and edit for your own project.
 
 settings:
   available_time: 3600       # total time budget (seconds)
   takt_time: 60              # target cycle time / line rate (seconds)
   time_increment: 1          # grid column resolution on granular sheets (seconds)
-  output_file: outputs/honda_seq_dev_111826.xlsx
+  output_file: outputs/sequence_report.xlsx
 
 resources:
   - id: Operator_1

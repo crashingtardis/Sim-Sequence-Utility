@@ -35,7 +35,8 @@ from PyQt6.QtWidgets import (
 from sim_sequence.models import SequenceModel, GlobalSettings, Resource, Task
 from sim_sequence.cseq_io import save_cseq, load_cseq
 from sim_sequence.scheduler import schedule
-from sim_sequence.excel_loader import load_excel, get_honda_sample_path
+from sim_sequence.excel_loader import load_excel
+from sim_sequence.sample_data import get_sample_sequence
 from sim_sequence.reporter import generate_report as write_report
 
 from .theme import DARK_STYLESHEET, COMAU_RED, EXEC_NAVY, SLATE, WHITE, SILVER
@@ -248,10 +249,10 @@ class MainWindow(QMainWindow):
 
         # Help
         help_menu = mb.addMenu("&Help")
-        act_load_honda = QAction("Load &Sample Honda Sequence (from Excel)", self)
-        act_load_honda.setStatusTip("Load sample automation sequence from the original Honda Excel sheet (honda_seq_dev_111826.xlsx)")
-        help_menu.addAction(act_load_honda)
-        act_load_honda.triggered.connect(self._load_sample_honda)
+        act_load_sample = QAction("Load &Sample Sequence (Body-Shop Cell)", self)
+        act_load_sample.setStatusTip("Load built-in sample body-shop automation sequence (22 tasks, 6 resources)")
+        help_menu.addAction(act_load_sample)
+        act_load_sample.triggered.connect(self._load_sample_sequence)
         help_menu.addSeparator()
         act_about = QAction("About Sim-Sequence Studio", self); help_menu.addAction(act_about)
         act_about.triggered.connect(self._about)
@@ -544,36 +545,29 @@ class MainWindow(QMainWindow):
         )
         return reply == QMessageBox.StandardButton.Discard
 
-    def _load_sample_honda(self):
-        """Load the original Honda welding sample sequence from honda_seq_dev_111826.xlsx."""
+    def _load_sample_sequence(self):
+        """Load built-in sample sequence directly from code (no external file needed)."""
         if not self._confirm_discard():
             return
 
-        sample_path = get_honda_sample_path()
-        if not sample_path.exists():
-            QMessageBox.warning(
-                self, "Sample File Not Found",
-                f"Could not locate sample Honda sequence file at:\n{sample_path}"
-            )
-            return
-
         try:
-            model = load_excel(sample_path)
-            self._current_path = sample_path
+            model = get_sample_sequence()
+            self._current_path = None
             self._load_model_into_panels(model)
             self._mark_dirty(False)
             self._run_simulation()
-            self._set_status(f"Loaded Honda weld sequence sample ({len(model.tasks)} tasks, {len(model.resources)} resources)")
+            self._set_status(f"Loaded sample body-shop sequence ({len(model.tasks)} tasks, {len(model.resources)} resources)")
             QMessageBox.information(
-                self, "Honda Sample Loaded",
-                f"Successfully loaded sample Honda automation sequence from:\n"
-                f"{sample_path.name}\n\n"
+                self, "Sample Sequence Loaded",
+                f"Successfully loaded built-in sample automation sequence:\n\n"
                 f"• Resources: {len(model.resources)}\n"
                 f"• Tasks: {len(model.tasks)}\n"
-                f"• Cycle Time: 65.0s (Line Takt: 60.0s — ⚠ Over Takt bottleneck analysis ready)"
+                f"• Cycle Time: 65.0s (Line Takt: 60.0s — ⚠ Over Takt bottleneck analysis ready)\n\n"
+                f"You can now inspect the Gantt chart, edit task durations or dependencies, "
+                f"and export to Excel or save as a .cseq file."
             )
         except Exception as exc:
-            QMessageBox.critical(self, "Load Error", f"Failed to load Honda sample:\n{exc}")
+            QMessageBox.critical(self, "Load Error", f"Failed to load sample sequence:\n{exc}")
 
     def _about(self):
         from sim_sequence import __version__

@@ -3,14 +3,13 @@ excel_loader.py — Parses Excel sequence files and returns a SequenceModel.
 
 Supports:
   1. Standard 3-sheet template (Settings / Resources / Tasks)
-  2. Original Honda sequence sheet (honda_seq_dev_111826.xlsx) with
-     resource definitions, sequential task items, and cross-resource interlocks.
+  2. Legacy timing matrix sequence sheets with sequential task items
+     and cross-resource start interlocks.
 """
 
 from __future__ import annotations
 
 import re
-import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -30,8 +29,8 @@ _SETTINGS_REQUIRED_KEYS = {
     "available_time", "takt_time", "time_increment"
 }
 
-# Distinct brand colors for Honda sheet resources
-HONDA_DEFAULT_COLORS = {
+# Standard industrial theme colors for timing matrix resources
+TIMING_MATRIX_DEFAULT_COLORS = {
     "operator 1":       "#1F4E78",   # Navy Blue
     "geo tool 1":       "#9C27B0",   # Purple
     "rbt 1 (geo weld)": "#4CAF50",   # Green
@@ -45,7 +44,7 @@ def load_excel(path: str | Path) -> SequenceModel:
     """Parse an Excel input file and return a :class:`SequenceModel`.
 
     Automatically detects whether the file is a standard 3-sheet template
-    or an original Honda sequence sheet.
+    or a legacy timing matrix sequence sheet.
     """
     path = Path(path)
     if not path.exists():
@@ -53,10 +52,10 @@ def load_excel(path: str | Path) -> SequenceModel:
 
     wb = openpyxl.load_workbook(str(path), data_only=True)
 
-    # If the standard Settings sheet is absent, check for Honda sheet format
+    # If the standard Settings sheet is absent, check for timing matrix format
     if _SHEET_SETTINGS not in wb.sheetnames:
-        if _is_honda_format(wb):
-            return load_honda_excel(path)
+        if _is_timing_matrix_format(wb):
+            return load_timing_matrix_excel(path)
         _assert_sheet(wb, _SHEET_SETTINGS, path)
 
     _assert_sheet(wb, _SHEET_SETTINGS,  path)
@@ -70,8 +69,8 @@ def load_excel(path: str | Path) -> SequenceModel:
     return SequenceModel(settings=settings, resources=resources, tasks=tasks)
 
 
-def _is_honda_format(wb: openpyxl.Workbook) -> bool:
-    """Check if any worksheet contains the signature header of the Honda sequence sheet."""
+def _is_timing_matrix_format(wb: openpyxl.Workbook) -> bool:
+    """Check if any worksheet contains the signature header of a timing matrix sheet."""
     for ws in wb.worksheets:
         for r in range(1, min(25, ws.max_row + 1)):
             row_vals = [
@@ -83,11 +82,11 @@ def _is_honda_format(wb: openpyxl.Workbook) -> bool:
     return False
 
 
-def load_honda_excel(path: str | Path) -> SequenceModel:
-    """Parse the original Honda automation sequence sheet (e.g. honda_seq_dev_111826.xlsx)."""
+def load_timing_matrix_excel(path: str | Path) -> SequenceModel:
+    """Parse a legacy timing matrix automation sequence sheet."""
     path = Path(path)
     if not path.exists():
-        raise FileNotFoundError(f"Honda Excel file not found: {path}")
+        raise FileNotFoundError(f"Excel file not found: {path}")
 
     wb = openpyxl.load_workbook(str(path), data_only=True)
     ws = wb["Sheet1"] if "Sheet1" in wb.sheetnames else wb.active
@@ -127,7 +126,7 @@ def load_honda_excel(path: str | Path) -> SequenceModel:
 
     # Build Resource models with dedicated colors
     resources = [
-        Resource(id=name, color=HONDA_DEFAULT_COLORS.get(name.lower(), "#607D8B"))
+        Resource(id=name, color=TIMING_MATRIX_DEFAULT_COLORS.get(name.lower(), "#607D8B"))
         for name in resources_dict.values()
     ]
 
@@ -174,41 +173,10 @@ def load_honda_excel(path: str | Path) -> SequenceModel:
         available_time=3600.0,
         takt_time=60.0,
         time_increment=1.0,
-        output_file="outputs/honda_seq_dev_111826.xlsx",
+        output_file="outputs/sequence_report.xlsx",
     )
 
     return SequenceModel(settings=settings, resources=resources, tasks=tasks)
-
-
-def get_honda_sample_path() -> Path:
-    """Locate the original Honda sequence Excel file across dev and frozen environments."""
-    filename = "honda_seq_dev_111826.xlsx"
-
-    # PyInstaller frozen bundle lookup
-    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
-        meipass_inputs = Path(sys._MEIPASS) / "inputs" / filename
-        if meipass_inputs.exists():
-            return meipass_inputs
-        meipass_root = Path(sys._MEIPASS) / filename
-        if meipass_root.exists():
-            return meipass_root
-
-    # Source workspace lookup
-    root = Path(__file__).parent.parent
-    p1 = root / "inputs" / filename
-    if p1.exists():
-        return p1
-    p2 = root / filename
-    if p2.exists():
-        return p2
-    p3 = Path.cwd() / "inputs" / filename
-    if p3.exists():
-        return p3
-    p4 = Path.cwd() / filename
-    if p4.exists():
-        return p4
-
-    return p1
 
 
 # ---------------------------------------------------------------------------
@@ -230,7 +198,7 @@ def _parse_settings(ws: Worksheet, path: Path) -> GlobalSettings:
             f"Settings sheet in '{path.name}' is missing keys: {missing}"
         )
 
-    out_file = str(raw.get("output_file") or "outputs/honda_seq_dev_111826.xlsx")
+    out_file = str(raw.get("output_file") or "outputs/sequence_report.xlsx")
 
     return GlobalSettings(
         available_time = float(raw["available_time"]),
