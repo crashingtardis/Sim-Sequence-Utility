@@ -5,6 +5,4 @@ openpyxl>=3.1
 pywin32>=306
 pillow>=10.0
 PyQt6>=6.5
-
-
-
+PyQt6-Charts>=6.5

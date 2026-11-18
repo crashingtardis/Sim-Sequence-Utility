@@ -14,6 +14,49 @@ Pre-`1.0.0` versions are considered **development** builds; the input template f
 
 ---
 
+## [0.6.0] — 2026-11-18
+
+### Added
+
+- **Native PyQt6 Desktop App (`studio/` package + `studio_app.py`)**:
+  - Full dark-themed desktop UI with Comau brand identity (Executive Navy, Comau Red, Slate palette).
+  - `MainWindow` — Splitter layout with resizable left panel (Settings / Resources / Tasks tabs) and right Gantt canvas.
+  - `HeaderBar` — Comau logo + title bar embedded at the top of the window.
+  - `GanttCanvas` — Hardware-accelerated `QGraphicsScene/View`-based interactive Gantt chart:
+    - Resource rows with coloured task bars per resource.
+    - Dashed Comau-Red vertical takt-time marker.
+    - Hover tooltips showing task detail (name, ID, resource, times, predecessors).
+    - Click-to-select: selects the clicked task and highlights it in the Tasks table.
+    - Zoom (`Ctrl+Scroll`) and pan (scroll bars / middle-mouse).
+    - Task labels rendered inline when bars are wide enough.
+    - Major/minor gridlines and time-axis tick labels.
+  - `KpiBar` — Live metric cards (Cycle Time, Takt Time, Utilization %, Task Count, Resource Count) + ✓ BALANCED / ⚠ OVER TAKT status badge, updated after every simulation run.
+  - `ResourcePanel` — Editable `QTableView` for resources; double-click colour column to open a colour picker dialog.
+  - `TaskPanel` — Editable `QTableView` for all task fields (ID, Name, Resource, Duration, FS/SS predecessors); click-to-select syncs with Gantt.
+  - `SettingsPanel` — Form for Available Time, Takt Time, Time Increment, Output File.
+  - **Menu bar**: File (New, Open .cseq, Save, Save As, Import Excel, Export Excel, Quit) | Simulation (Run) | View (Zoom In/Out/Reset) | Help (About).
+  - **Toolbar**: New, Open, Save, Import Excel, Export Excel, Run.
+  - **Background scheduling** runs in a `QThread` so the UI stays responsive during compute.
+  - **Bidirectional Excel integration**: Import from `.xlsx` template → edit in Studio → Export polished Gantt report `.xlsx`.
+  - **Native `.cseq` file format** (JSON-based, Git-friendly, diffable) with Save / Save As / Open dialogs.
+  - **File-association ready**: `python studio_app.py path/to/sequence.cseq` opens the file on launch.
+  - Unsaved-changes guard on close / new / open.
+- **`requirements.txt`** — added `PyQt6>=6.5`, `PyQt6-Charts>=6.5`.
+
+
+
+**`MAJOR.MINOR.PATCH`**
+
+| Digit | Bumps when… |
+| --- | --- |
+| **MAJOR** | Input schema or output structure changes in a **breaking** way (e.g. renamed required columns, restructured sheets) |
+| **MINOR** | New **feature** added in a backward-compatible way (new input format, new sheet type, new dependency type, new CLI flag) |
+| **PATCH** | Bug fix, formatting tweak, refactor, or test addition — no behaviour change visible to the user |
+
+Pre-`1.0.0` versions are considered **development** builds; the input template format may still evolve.
+
+---
+
 ## [0.5.0] — 2026-11-18
 
 ### Added
