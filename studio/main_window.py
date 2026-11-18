@@ -193,6 +193,9 @@ class MainWindow(QMainWindow):
 
         self._gantt_view = GanttView()
         self._gantt_view.task_clicked.connect(self._on_task_clicked)
+        self._gantt_view.task_resized.connect(self._on_task_resized)
+        self._gantt_view.dependency_added.connect(self._on_dependency_added)
+        self._gantt_view.dependency_removed.connect(self._on_dependency_removed)
         right_layout.addWidget(self._gantt_view, stretch=1)
 
         # KPI bar under the Gantt
@@ -452,7 +455,7 @@ class MainWindow(QMainWindow):
         self._set_status(f"Error: {msg}")
 
     # =========================================================================
-    # Task click
+    # Task click / resize
     # =========================================================================
     def _on_task_clicked(self, task):
         if task is not None:
@@ -463,6 +466,62 @@ class MainWindow(QMainWindow):
                 f"Duration: {task.duration:.1f}s | "
                 f"Start: {task.start_time:.2f}s | End: {task.end_time:.2f}s"
             )
+
+    def _on_task_resized(self, task):
+        """Called when user drag-resizes a task bar — auto-reschedule."""
+        self._set_status(f"Resized '{task.name}' → {task.duration:.1f}s — rescheduling…")
+        self._mark_dirty(True)
+        self._run_simulation()
+
+    def _on_dependency_added(self, source_id: str, target_id: str, dep_type: str):
+        """Add dependency between tasks and reschedule."""
+        target_task = None
+        for t in self._task_panel.tasks():
+            if t.id == target_id:
+                target_task = t
+                break
+        if not target_task:
+            return
+
+        if dep_type == "FS":
+            if source_id in target_task.predecessors_fs:
+                self._set_status(f"Dependency {source_id} ➔ {target_id} (FS) already exists.")
+                return
+            target_task.predecessors_fs.append(source_id)
+        elif dep_type == "SS":
+            if source_id in target_task.predecessors_ss:
+                self._set_status(f"Dependency {source_id} ➔ {target_id} (SS) already exists.")
+                return
+            target_task.predecessors_ss.append(source_id)
+
+        self._task_panel.set_tasks(self._task_panel.tasks())
+        self._mark_dirty(True)
+        self._set_status(f"Added {dep_type} dependency: {source_id} ➔ {target_id} — rescheduling…")
+        self._run_simulation()
+
+    def _on_dependency_removed(self, source_id: str, target_id: str, dep_type: str):
+        """Remove dependency between tasks and reschedule."""
+        target_task = None
+        for t in self._task_panel.tasks():
+            if t.id == target_id:
+                target_task = t
+                break
+        if not target_task:
+            return
+
+        changed = False
+        if dep_type == "FS" and source_id in target_task.predecessors_fs:
+            target_task.predecessors_fs.remove(source_id)
+            changed = True
+        elif dep_type == "SS" and source_id in target_task.predecessors_ss:
+            target_task.predecessors_ss.remove(source_id)
+            changed = True
+
+        if changed:
+            self._task_panel.set_tasks(self._task_panel.tasks())
+            self._mark_dirty(True)
+            self._set_status(f"Removed {dep_type} dependency: {source_id} ➔ {target_id} — rescheduling…")
+            self._run_simulation()
 
     # =========================================================================
     # Misc events

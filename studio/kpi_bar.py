@@ -63,6 +63,15 @@ class KpiBar(QWidget):
 
         self._layout.addStretch()
 
+        # Arrow legend
+        legend = QLabel(
+            "——  FS dependency   &nbsp;&nbsp;"
+            "<span style='color:#F39C12'>- - -</span>  SS dependency"
+        )
+        legend.setStyleSheet("color:#607D8B; font-size:8pt;")
+        legend.setTextFormat(Qt.TextFormat.RichText)
+        self._layout.addWidget(legend)
+
         # Status badge
         self._status_lbl = QLabel("No data")
         self._status_lbl.setStyleSheet(
