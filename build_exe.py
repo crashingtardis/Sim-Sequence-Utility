@@ -65,6 +65,7 @@ def _run_pyinstaller(icon_path: str | None):
         # Data files bundled into the exe
         "--add-data", f"{ROOT / 'resources' / 'Logo-COMAU.png'};resources",
         "--add-data", f"{ROOT / 'inputs' / 'honda_weld_sequence.cseq'};inputs",
+        "--add-data", f"{ROOT / 'inputs' / 'honda_seq_dev_111826.xlsx'};inputs",
         # Hidden imports PyInstaller may miss
         "--hidden-import", "PyQt6.sip",
         "--hidden-import", "networkx.algorithms",

@@ -14,6 +14,26 @@ Pre-`1.0.0` versions are considered **development** builds; the input template f
 
 ---
 
+## [0.8.0] — 2026-11-18
+
+### Added
+
+- **Original Honda Excel Sheet Parser (`sim_sequence/excel_loader.py`)**:
+  - Implemented `load_honda_excel(path)` to directly parse the real Honda body-shop welding sequence spreadsheet (`honda_seq_dev_111826.xlsx`).
+  - Automatic format detection in `load_excel()`: auto-dispatches between the 3-sheet template and the original Honda layout without requiring manual format selection.
+  - Extracted all 6 resources (`operator 1`, `geo tool 1`, `rbt 1 (geo weld)`, `rbt 2 (geo weld)`, `rbt 3 (mh)`, `unload conv`) with custom industrial theme colors.
+  - Extracted all 22 tasks (`a1`–`f1`) preserving intra-resource sequential ordering and cross-resource start interlocks (`start_int`).
+  - Added `get_honda_sample_path()` with search priority across PyInstaller frozen bundle (`sys._MEIPASS`), `inputs/`, root, and CWD.
+- **Help Menu Honda Sample Sequence Action (`studio/main_window.py`)**:
+  - Added **`Help -> Load Sample Honda Sequence (from Excel)`** action.
+  - Prompts to confirm discard if changes are unsaved, loads `honda_seq_dev_111826.xlsx`, populates all tables, runs simulation, renders the interactive Gantt chart, and displays the KPI cards (65.0s Cycle Time vs 60.0s Takt Time).
+- **Executable Packaging Bundling**:
+  - Updated `build_exe.py` and `SimSequenceStudio.spec` to bundle `inputs/honda_seq_dev_111826.xlsx` into the standalone binary.
+- **Test Suite Updates (`tests/test_excel_loader.py`)**:
+  - Added unit tests for direct Honda sheet loading and automatic format auto-dispatch. All 21 tests pass.
+
+---
+
 ## [0.7.0] — 2026-11-18
 
 ### Added

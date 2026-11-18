@@ -5,7 +5,11 @@ a = Analysis(
     ['D:/Users/moroa/Code/Sim-Sequence-Utility/studio_app.py'],
     pathex=[],
     binaries=[],
-    datas=[('D:/Users/moroa/Code/Sim-Sequence-Utility/resources/Logo-COMAU.png', 'resources'), ('D:/Users/moroa/Code/Sim-Sequence-Utility/inputs/honda_weld_sequence.cseq', 'inputs')],
+    datas=[
+        ('D:/Users/moroa/Code/Sim-Sequence-Utility/resources/Logo-COMAU.png', 'resources'),
+        ('D:/Users/moroa/Code/Sim-Sequence-Utility/inputs/honda_weld_sequence.cseq', 'inputs'),
+        ('D:/Users/moroa/Code/Sim-Sequence-Utility/inputs/honda_seq_dev_111826.xlsx', 'inputs'),
+    ],
     hiddenimports=['PyQt6.sip', 'networkx.algorithms', 'networkx.classes', 'networkx.generators', 'yaml'],
     hookspath=[],
     hooksconfig={},

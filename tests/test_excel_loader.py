@@ -130,3 +130,40 @@ def test_missing_setting_key_raises(tmp_path):
     path = _make_workbook(tmp_path, settings=settings)
     with pytest.raises(ValueError, match="takt_time"):
         load_excel(path)
+
+
+# ---------------------------------------------------------------------------
+# Honda sequence sheet tests
+# ---------------------------------------------------------------------------
+
+def test_load_honda_excel_direct():
+    from sim_sequence.excel_loader import load_honda_excel, get_honda_sample_path
+    sample_path = get_honda_sample_path()
+    assert sample_path.exists()
+
+    model = load_honda_excel(sample_path)
+    assert len(model.resources) == 6
+    assert len(model.tasks) == 22
+
+    res_names = {r.id for r in model.resources}
+    assert "operator 1" in res_names
+    assert "rbt 1 (geo weld)" in res_names
+    assert "unload conv" in res_names
+
+    task_map = {t.id: t for t in model.tasks}
+    assert "a1" in task_map
+    assert "b1" in task_map
+    assert "b1" in task_map
+    assert task_map["b1"].predecessors_fs == ["a1"]
+    assert "c3" in task_map
+    assert "d4" in task_map["b2"].predecessors_fs
+
+
+def test_load_honda_excel_auto_dispatch():
+    from sim_sequence.excel_loader import load_excel, get_honda_sample_path
+    sample_path = get_honda_sample_path()
+    # load_excel automatically detects Honda format without Settings sheet
+    model = load_excel(sample_path)
+    assert len(model.tasks) == 22
+    assert len(model.resources) == 6
+

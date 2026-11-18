@@ -1,8 +1,8 @@
 # Comau Sim-Sequence Studio
 
-> **v0.7.0** — Native PyQt6 desktop application for automation sequence scheduling, interactive Gantt visualization, and executable packaging.
+> **v0.8.0** — Native PyQt6 desktop application for automation sequence scheduling, interactive Gantt visualization, and executable packaging.
 
-A Python-based engineering tool for defining, scheduling, and visualizing automation sequences. Supports a native `.cseq` file format, bidirectional Excel import/export, an interactive dark-themed desktop UI with Comau branding, live drag-to-resize duration, interactive drag-and-drop dependency linking, and standalone `.exe` packaging.
+A Python-based engineering tool for defining, scheduling, and visualizing automation sequences. Supports a native `.cseq` file format, bidirectional Excel import/export (including original Honda sequence sheets), an interactive dark-themed desktop UI with Comau branding, live drag-to-resize duration, interactive drag-and-drop dependency linking, and standalone `.exe` packaging.
 
 ---
 
@@ -77,17 +77,18 @@ Sim-Sequence-Utility/
 │
 ├── inputs/
 │   ├── honda_weld_sequence.cseq   # Sample native sequence file (17 tasks, 4 resources)
-│   ├── sequence_template.xlsx     # Excel input template
+│   ├── honda_seq_dev_111826.xlsx  # Original Honda weld sequence Excel sheet (22 tasks, 6 resources)
+│   ├── sequence_template.xlsx     # Standard 3-sheet Excel input template
 │   └── example_sequence.yaml      # Sample YAML input
 │
 ├── outputs/                   # Generated reports land here
 │   └── sim_sequence_standalone.xlsm
 │
 ├── sim_sequence/              # Core scheduling + reporting package
-│   ├── __init__.py            #   Package version (0.7.0)
+│   ├── __init__.py            #   Package version (0.8.0)
 │   ├── models.py              #   Data classes: Task, Resource, GlobalSettings, SequenceModel
 │   ├── loader.py              #   YAML → SequenceModel
-│   ├── excel_loader.py        #   Excel template → SequenceModel
+│   ├── excel_loader.py        #   Excel template & Honda sheet → SequenceModel parser
 │   ├── cseq_io.py             #   .cseq (JSON) save/load
 │   ├── scheduler.py           #   NetworkX DAG scheduler (FS + SS dependencies)
 │   ├── reporter.py            #   XlsxWriter Excel report & Gantt generator
@@ -101,7 +102,7 @@ Sim-Sequence-Utility/
 └── tests/
     ├── test_cseq_io.py        # Tests for .cseq file format serializer/deserializer
     ├── test_loader.py
-    ├── test_excel_loader.py
+    ├── test_excel_loader.py   # Tests for 3-sheet and Honda sequence sheet parsing
     ├── test_embedder.py
     └── test_scheduler.py
 ```
@@ -122,9 +123,10 @@ Sim-Sequence-Utility/
 | **Live KPI Bar** | Instant calculation of Total Cycle Time, Takt Time, Utilization %, Task & Resource counts, and `✓ BALANCED` / `⚠ OVER TAKT` badge |
 | **Dependency Legend** | Visual guide in the KPI bar distinguishing solid FS from dashed SS arrows |
 | **Resource & Task Editors** | Inline table editors for ID, Name, Resource, Duration, and comma-separated Predecessors; double-click color to open color picker |
+| **Load Sample Honda Sequence** | Accessible directly from **Help -> Load Sample Honda Sequence (from Excel)**; immediately loads and visualizes the full 22-task Honda dataset |
 | **Background Scheduling** | Scheduling and DAG analysis run asynchronously in a dedicated `QThread`, ensuring zero UI lockup |
 | **Native `.cseq` File Format** | Clean, version-controlled JSON format for sequences |
-| **Bidirectional Excel Integration** | Import existing `.xlsx`/`.xlsm` sequence spreadsheets into the studio; export presentation-ready Excel reports with drill-downs |
+| **Bidirectional Excel Integration** | Import both 3-sheet templates and original Honda timing sheets; export presentation-ready Excel reports with drill-downs |
 | **Comau Brand Theme** | Professional industrial dark palette (Executive Navy `#0B2341`, Comau Red `#C8102E`, Slate `#1A2E40`) |
 
 ### Keyboard Shortcuts
@@ -242,7 +244,7 @@ pytest tests/
 python -m pytest tests/
 ```
 
-All 19 unit tests validate loaders, DAG scheduling, Excel output, embedding, and `.cseq` serialization.
+All 21 unit tests validate loaders (including 3-sheet templates and original Honda sheets), DAG scheduling, Excel output, embedding, and `.cseq` serialization.
 
 ---
 

@@ -363,3 +363,50 @@ Committed as `c35e0f8` and pushed to `main`.
    - Bumped version to `0.7.0` in `sim_sequence/__init__.py`.
    - Updated `CHANGELOG.md` and `README.md`.
 
+
+---
+
+## Session 9 — Original Honda Excel Sample Data Integration & Help Menu
+
+**User:**
+> `Give it the ability to load the sample data from the original Honda excel sheet.`
+> `Put that under the Help menu`
+
+### Analysis & Implementation — v0.8.0
+
+1. **Original Honda Excel Sheet Analysis (`honda_seq_dev_111826.xlsx`)**:
+   - Analyzed the structure of `honda_seq_dev_111826.xlsx` (`Sheet1`):
+     - Resource codes (`a` through `f`) mapped to names (`operator 1`, `geo tool 1`, `rbt 1 (geo weld)`, `rbt 2 (geo weld)`, `rbt 3 (mh)`, `unload conv`).
+     - 22 distinct tasks across item numbers 1 through 6 per resource.
+     - Start interlocks (`start_int`) defining cross-resource dependencies (e.g., `a1` -> `b1`, `b1` -> `c2`/`d2`, `d3` -> `c3`, `c3`/`d4` -> `b2`, `b2` -> `e2`, `e4` -> `f1`, `f1` -> `a3`).
+     - Task durations in seconds (from column T with column U fallback).
+
+2. **Parser Implementation (`sim_sequence/excel_loader.py`)**:
+   - Implemented `load_honda_excel(path)`:
+     - Parses all 6 resources and assigns dedicated Comau/industrial theme colors.
+     - Parses all 22 tasks, automatically establishing sequential flow within each resource (`item k` after `item k-1`) plus all cross-resource start interlocks from `start_int`.
+     - Normalizes predecessor syntax (e.g. `c3, 4d` -> `['c3', 'd4']`).
+     - Filters inter-cycle loopbacks (e.g., `e2` on `a1`) for single-cycle DAG simulation.
+   - Updated `load_excel(path)`:
+     - Automatically inspects worksheets for Honda sequence sheet signatures and auto-dispatches between standard 3-sheet templates and original Honda sheets.
+   - Added `get_honda_sample_path()`:
+     - Resolves the file across PyInstaller frozen environments (`sys._MEIPASS`), `inputs/`, workspace root, and CWD.
+
+3. **Help Menu Integration (`studio/main_window.py`)**:
+   - Added **`Help -> Load Sample Honda Sequence (from Excel)`** action.
+   - On trigger:
+     - Prompts user to confirm discarding unsaved work if the current sequence is dirty.
+     - Loads `honda_seq_dev_111826.xlsx` directly into the studio.
+     - Populates the Resources, Tasks, and Settings tables.
+     - Runs simulation and updates the Gantt canvas with all 22 task bars and dependency arrows.
+     - Refreshes KPI cards: Total Cycle Time: 65.0s, Takt: 60.0s, Utilization: 108.3%, Line Balance Badge: `⚠ OVER TAKT`.
+     - Displays confirmation message box summarizing the loaded sample sequence.
+
+4. **Executable Packaging & Assets**:
+   - Copied `honda_seq_dev_111826.xlsx` into `inputs/` for unified distribution.
+   - Updated `build_exe.py` and `SimSequenceStudio.spec` to bundle `inputs/honda_seq_dev_111826.xlsx` into `SimSequenceStudio.exe`.
+
+5. **Testing & Verification**:
+   - Added unit tests in `tests/test_excel_loader.py` for direct and auto-dispatch loading.
+   - All 21 tests pass (`pytest tests/`).
+   - Verified smoke test of `MainWindow._load_sample_honda()` using Qt offscreen platform.
