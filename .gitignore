@@ -18,8 +18,8 @@ venv/
 env/
 
 # PyInstaller / Build outputs
-build/
-dist/
+# build/
+# dist/
 
 # IDE / Editor files
 .vscode/
