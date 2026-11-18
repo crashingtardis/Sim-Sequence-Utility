@@ -1,0 +1,204 @@
+{
+  "format": "COMAU_SEQUENCE",
+  "version": "1.0",
+  "settings": {
+    "available_time": 3600,
+    "takt_time": 60,
+    "time_increment": 1,
+    "output_file": "outputs/honda_seq_dev_111826.xlsx"
+  },
+  "resources": [
+    {
+      "id": "Operator_1",
+      "color": "#1F4E78"
+    },
+    {
+      "id": "Robot_A",
+      "color": "#4CAF50"
+    },
+    {
+      "id": "Robot_B",
+      "color": "#FF9800"
+    },
+    {
+      "id": "Tool_Fixture",
+      "color": "#9C27B0"
+    }
+  ],
+  "tasks": [
+    {
+      "id": "Op1_GetPart",
+      "name": "Get Part from Rack",
+      "resource": "Operator_1",
+      "duration": 4.0,
+      "predecessors_fs": [],
+      "predecessors_ss": []
+    },
+    {
+      "id": "Op1_Load",
+      "name": "Load Part to Fixture",
+      "resource": "Operator_1",
+      "duration": 5.0,
+      "predecessors_fs": [
+        "Op1_GetPart"
+      ],
+      "predecessors_ss": []
+    },
+    {
+      "id": "Op1_SafetyCheck",
+      "name": "Safety Check / Clear Zone",
+      "resource": "Operator_1",
+      "duration": 2.0,
+      "predecessors_fs": [
+        "Op1_Load"
+      ],
+      "predecessors_ss": []
+    },
+    {
+      "id": "Op1_Unload",
+      "name": "Unload Finished Part",
+      "resource": "Operator_1",
+      "duration": 4.0,
+      "predecessors_fs": [
+        "RobA_Weld2",
+        "RobB_Weld2"
+      ],
+      "predecessors_ss": []
+    },
+    {
+      "id": "RobA_MoveIn",
+      "name": "Robot A Move-In",
+      "resource": "Robot_A",
+      "duration": 3.0,
+      "predecessors_fs": [
+        "Op1_SafetyCheck"
+      ],
+      "predecessors_ss": []
+    },
+    {
+      "id": "RobA_Weld1",
+      "name": "Robot A \u2014 Weld Pass 1",
+      "resource": "Robot_A",
+      "duration": 10.0,
+      "predecessors_fs": [
+        "RobA_MoveIn"
+      ],
+      "predecessors_ss": []
+    },
+    {
+      "id": "RobA_Reposition",
+      "name": "Robot A \u2014 Reposition",
+      "resource": "Robot_A",
+      "duration": 2.0,
+      "predecessors_fs": [
+        "RobA_Weld1"
+      ],
+      "predecessors_ss": []
+    },
+    {
+      "id": "RobA_Weld2",
+      "name": "Robot A \u2014 Weld Pass 2",
+      "resource": "Robot_A",
+      "duration": 8.0,
+      "predecessors_fs": [
+        "RobA_Reposition"
+      ],
+      "predecessors_ss": []
+    },
+    {
+      "id": "RobA_MoveOut",
+      "name": "Robot A Move-Out",
+      "resource": "Robot_A",
+      "duration": 3.0,
+      "predecessors_fs": [
+        "RobA_Weld2"
+      ],
+      "predecessors_ss": []
+    },
+    {
+      "id": "RobB_MoveIn",
+      "name": "Robot B Move-In",
+      "resource": "Robot_B",
+      "duration": 3.0,
+      "predecessors_fs": [
+        "Op1_SafetyCheck"
+      ],
+      "predecessors_ss": []
+    },
+    {
+      "id": "RobB_Weld1",
+      "name": "Robot B \u2014 Weld Pass 1",
+      "resource": "Robot_B",
+      "duration": 10.0,
+      "predecessors_fs": [
+        "RobB_MoveIn"
+      ],
+      "predecessors_ss": [
+        "RobA_Weld1"
+      ]
+    },
+    {
+      "id": "RobB_Reposition",
+      "name": "Robot B \u2014 Reposition",
+      "resource": "Robot_B",
+      "duration": 2.0,
+      "predecessors_fs": [
+        "RobB_Weld1"
+      ],
+      "predecessors_ss": []
+    },
+    {
+      "id": "RobB_Weld2",
+      "name": "Robot B \u2014 Weld Pass 2",
+      "resource": "Robot_B",
+      "duration": 8.0,
+      "predecessors_fs": [
+        "RobB_Reposition"
+      ],
+      "predecessors_ss": [
+        "RobA_Weld2"
+      ]
+    },
+    {
+      "id": "RobB_MoveOut",
+      "name": "Robot B Move-Out",
+      "resource": "Robot_B",
+      "duration": 3.0,
+      "predecessors_fs": [
+        "RobB_Weld2"
+      ],
+      "predecessors_ss": []
+    },
+    {
+      "id": "Fix_Clamp",
+      "name": "Clamp Part",
+      "resource": "Tool_Fixture",
+      "duration": 2.0,
+      "predecessors_fs": [
+        "Op1_Load"
+      ],
+      "predecessors_ss": []
+    },
+    {
+      "id": "Fix_Hold",
+      "name": "Hold During Weld",
+      "resource": "Tool_Fixture",
+      "duration": 24.0,
+      "predecessors_fs": [
+        "Fix_Clamp"
+      ],
+      "predecessors_ss": []
+    },
+    {
+      "id": "Fix_Unclamp",
+      "name": "Unclamp Part",
+      "resource": "Tool_Fixture",
+      "duration": 2.0,
+      "predecessors_fs": [
+        "RobA_MoveOut",
+        "RobB_MoveOut"
+      ],
+      "predecessors_ss": []
+    }
+  ]
+}
