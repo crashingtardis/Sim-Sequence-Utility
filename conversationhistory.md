@@ -446,3 +446,61 @@ Would you prefer a native desktop app (e.g. PyQt6 / PySide6 compiled to a single
 Native desktop
 Write all of this to git repo using my username crashingtardis
 <https://github.com/crashingtardis/Sim-Sequence-Utility>
+
+Native desktop
+Write all of this to git repo using my username crashingtardis
+https://github.com/crashingtardis/Sim-Sequence-Utility
+
+Picked up conversation history from conversationhistory.md. Installed PyQt6 and built the native desktop app (v0.6.0):
+
+What was built — studio/ package + studio_app.py
+
+studio/theme.py — Comau dark-mode stylesheet, full brand palette (Comau Red #C8102E, Executive Navy #0B2341, Slate #1A2E40), resource colour cycle, all Qt widget overrides.
+
+studio/gantt_canvas.py — QGraphicsScene/View-based interactive Gantt chart:
+  - Coloured task bars per resource (from resource color field)
+  - Dashed Comau-Red vertical takt-time marker line
+  - Hover tooltips showing task name, ID, resource, start/end times, predecessor lists
+  - Click-to-select: selects task bar, highlights matching row in Tasks table, updates status bar
+  - Ctrl+Scroll to zoom in/out (MIN 4 px/s to MAX 80 px/s), scroll bars + middle-mouse to pan
+  - Inline task labels when bars are wide enough; major/minor gridlines; tick labels on time axis
+  - Alternating row stripes by resource; left column shows resource names in their own colour
+
+studio/task_panel.py — ResourcePanel + TaskPanel:
+  - ResourceTableModel and TaskTableModel — QAbstractTableModel subclasses
+  - ColourSwatchDelegate renders hex colour as a filled rectangle in the colour column
+  - Double-click colour column → QColorDialog
+  - Add / Remove buttons with styled pill buttons
+
+studio/settings_panel.py — QGroupBox form for Available Time, Takt Time, Time Increment, Output File.
+
+studio/kpi_bar.py — Slim KPI strip under the Gantt:
+  - Cycle Time / Takt Time / Utilization % / Task Count / Resource Count cards
+  - ✓ BALANCED badge (green) or ⚠ OVER TAKT badge (red)
+
+studio/main_window.py — QMainWindow:
+  - Header bar with Comau logo + "SIM-SEQUENCE STUDIO" title + version badge
+  - Splitter: left panel (Settings / Resources / Tasks tabs + ▶ RUN SIMULATION button) | right Gantt + KPI bar
+  - Full menu bar: File (New, Open .cseq, Save, Save As, Import Excel, Export Excel, Quit) | Simulation (Run, F5) | View (Zoom In/Out/Reset) | Help (About)
+  - Toolbar: New, Open, Save, Import Excel, Export Excel, Run
+  - Background QThread scheduling — UI stays responsive
+  - Bidirectional Excel: Import from .xlsx template, Export polished Gantt report .xlsx
+  - Native .cseq save/load with QFileDialog
+  - Unsaved-changes guard on close/new/open; dirty indicator (*) in title bar
+
+studio_app.py — Entry point, opens .cseq or .xlsx passed as CLI argument.
+
+Also fixed: reporter.py exports generate_report (not write_report) — corrected import in main_window.py.
+
+Version bumped to 0.6.0. CHANGELOG.md updated. requirements.txt updated (added PyQt6-Charts).
+All committed and pushed to https://github.com/crashingtardis/Sim-Sequence-Utility (commit 5674262).
+
+always make sure the readme is updated, and always add the conversation history to the md file.
+
+Understood — from now on, every set of changes will:
+1. Update README.md to reflect the current state of the project (structure, features, usage).
+2. Append a new entry to conversationhistory.md summarising what was discussed and built.
+3. Commit and push both files alongside any code changes.
+
+Updated README.md to v0.6.0: full project structure tree, desktop app feature table, keyboard shortcuts, .cseq format reference, dependency table, and updated quick-start commands.
+Appended this session to conversationhistory.md.
