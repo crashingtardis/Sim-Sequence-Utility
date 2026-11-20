@@ -1,10 +1,8 @@
+# Runtime dependencies
 networkx>=3.0
 XlsxWriter>=3.1
 PyYAML>=6.0
 openpyxl>=3.1
-pywin32>=306
-pillow>=10.0
 PyQt6>=6.5
-PyQt6-Charts>=6.5
-pytest>=8.0
-pyinstaller>=6.0
+# Only needed by make_standalone.py (Excel COM automation) - Windows only
+pywin32>=306; sys_platform == "win32"

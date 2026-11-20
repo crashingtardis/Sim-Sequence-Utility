@@ -1,258 +1,404 @@
 """
-gantt_canvas.py — Interactive Gantt chart canvas using QGraphicsScene/View.
+gantt_canvas.py — Interactive Gantt chart (QGraphicsScene / QGraphicsView).
 
-Features:
-  - Horizontal timeline, resources on Y-axis
-  - Task bars coloured by resource
-  - Vertical takt-time marker line (Comau Red)
-  - Hover tooltips with task details
-  - Zoom (Ctrl+Scroll) and pan (middle-mouse / scroll)
-  - Click-to-select task (emits signal to update sidebar)
-  - Drag right edge of bar to resize duration (live reschedule on release)
-  - Dependency arrows drawn between tasks (FS = solid grey, SS = dashed amber)
-  - Right-click drag from Task A to Task B to link dependencies (FS or SS)
-  - Right-click on existing dependency arrow to remove it
+Interaction
+-----------
+* Drag the **right handle** (blue) of a bar onto another bar  -> FS link
+  (target starts after the source finishes).
+* Drag the **left handle** (amber) of a bar onto another bar  -> SS link
+  (target starts no earlier than the source starts).
+  While dragging, the bar under the cursor turns green (valid) or red
+  (invalid: self-link, duplicate, or would create a cycle).  Esc cancels.
+* Click a link to select it, then press **Delete** or click its red ✕ to
+  remove it.  Right-click a link also offers "Remove".
+* Drag the right edge of a bar to change its duration.
+* Ctrl+Wheel zooms; "Fit" fits the sequence to the window and keeps it fitted
+  as the window is resized until you zoom manually.
+
+Layout
+------
+* The resource column and time header are "sticky": they stay visible while
+  you scroll.
+* Tasks of one resource that overlap in time are stacked in sub-lanes so
+  bars never draw on top of each other.
+* Bar text is elided to fit its bar; tick spacing adapts to the zoom level.
+
+The scene never mutates the model.  It emits signals (by task ID) and the
+main window applies the change through the ProjectStore.  Signals fired from
+inside an item's mouse handler are deferred with a zero-delay timer because
+handling them rebuilds the scene (and would otherwise delete the item whose
+handler is still running).
 """
 
 from __future__ import annotations
 
 import math
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
-from PyQt6.QtCore import (Qt, QRectF, QPointF, pyqtSignal, QObject, QLineF)
-from PyQt6.QtGui import (
-    QColor, QBrush, QPen, QPainter, QFont, QCursor, QPolygonF, QPainterPath,
-)
-from PyQt6.QtWidgets import (
-    QGraphicsScene, QGraphicsView, QGraphicsRectItem,
-    QGraphicsLineItem, QGraphicsItem, QGraphicsPathItem,
-    QToolTip, QGraphicsSimpleTextItem, QGraphicsEllipseItem,
-    QGraphicsPolygonItem, QMenu,
-)
+from PyQt6.QtCore import QLineF, QPointF, QRectF, Qt, QTimer, pyqtSignal
+from PyQt6.QtGui import (QBrush, QColor, QCursor, QFont, QFontMetrics,
+                         QPainter, QPainterPath, QPainterPathStroker, QPen,
+                         QPolygonF)
+from PyQt6.QtWidgets import (QFrame, QGraphicsEllipseItem, QGraphicsItem,
+                             QGraphicsLineItem, QGraphicsPathItem,
+                             QGraphicsPolygonItem, QGraphicsRectItem,
+                             QGraphicsScene, QGraphicsSimpleTextItem,
+                             QGraphicsView, QMenu)
 
-from sim_sequence.models import SequenceModel, Task, Resource
-from .theme import COMAU_RED, EXEC_NAVY, SLATE, WHITE, SILVER, GRID_LINE, RESOURCE_PALETTE
+from sim_sequence.graph_ops import assign_lanes, nice_tick_step
+from sim_sequence.models import SequenceModel, Task
+
+from .theme import COMAU_RED, DARK, RESOURCE_PALETTE, Theme, contrast_color
 
 # ---------------------------------------------------------------------------
 # Layout constants
 # ---------------------------------------------------------------------------
-ROW_HEIGHT   = 44
-ROW_PADDING  = 6
-LABEL_WIDTH  = 160
-HEADER_H     = 40
-TICK_MAJOR   = 5          # seconds between major tick labels
-MIN_PX_PER_S = 4.0
-MAX_PX_PER_S = 80.0
+HEADER_H = 34
+BAR_H = 24
+LANE_H = 30                      # bar height + gap between stacked lanes
+ROW_PAD = 8                      # space above / below the lanes of a resource row
+MIN_LABEL_W, MAX_LABEL_W = 110, 260
+MIN_PX_PER_S, MAX_PX_PER_S = 0.5, 120.0
 DEFAULT_PX_S = 14.0
-RESIZE_HANDLE_W = 8       # px width of the right-edge resize handle
-ARROW_HEAD_SIZE = 8       # px arrowhead length
+RESIZE_HANDLE_W = 8
+PORT_R = 5.0                     # link handle radius
+PORT_GAP = 9.0                   # distance from bar edge to handle centre
+ARROW_HEAD = 8.0
+ROUTE_GAP = 12.0                 # stub length when routing around bars
+HIT_WIDTH = 10.0                 # clickable width of a link
 
-TAKT_COLOR   = QColor(COMAU_RED)
-GRID_COLOR   = QColor(GRID_LINE)
-BG_COLOR     = QColor("#0D1B2A")
-HDR_COLOR    = QColor(EXEC_NAVY)
-ROW_ALT      = QColor("#0F1F30")
-ROW_EVEN     = QColor("#0D1B2A")
-LABEL_FG     = QColor(SILVER)
-TASK_FG      = QColor(WHITE)
-SELECT_COLOR = QColor("#2979FF")
-RESIZE_COLOR = QColor("#FFFFFF")
-FS_ARROW_COLOR = QColor("#B0BAC4")
-SS_ARROW_COLOR = QColor("#F39C12")
+FS, SS = "FS", "SS"
+
+
+def _fmt_time(t: float) -> str:
+    if t >= 120:
+        return f"{int(t // 60)}:{int(t % 60):02d}"
+    return f"{t:g}s"
 
 
 # ---------------------------------------------------------------------------
 # Dependency arrow
 # ---------------------------------------------------------------------------
+class DeleteBadge(QGraphicsEllipseItem):
+    """Red ✕ shown on a selected link; clicking removes the link."""
+    R = 8.0
+
+    def __init__(self, arrow: "DependencyArrow"):
+        super().__init__(-self.R, -self.R, 2 * self.R, 2 * self.R, arrow)
+        self._arrow = arrow
+        self.setZValue(10)
+        self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.setToolTip("Remove this link")
+
+    def paint(self, painter, option, widget=None):
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setBrush(QBrush(QColor(self._arrow.theme.link_bad)))
+        painter.setPen(QPen(QColor("#FFFFFF"), 1.5))
+        painter.drawEllipse(self.rect())
+        painter.setPen(QPen(QColor("#FFFFFF"), 2.0, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        d = 3.0
+        painter.drawLine(QPointF(-d, -d), QPointF(d, d))
+        painter.drawLine(QPointF(-d, d), QPointF(d, -d))
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._arrow.request_delete()
+            event.accept()
+        else:
+            event.ignore()
+
+
 class DependencyArrow(QGraphicsPathItem):
-    """Draws an elbow arrow from one task bar to another with context menu support."""
+    """An FS (solid) or SS (dashed) link between two bars."""
 
-    def __init__(self, pred_id: str, task_id: str, dep_type: str, color: QColor, parent=None):
-        super().__init__(parent)
-        self.pred_id = pred_id
-        self.task_id = task_id
-        self.dep_type = dep_type   # "FS" or "SS"
-        self._color = color
-        style = Qt.PenStyle.SolidLine if dep_type == "FS" else Qt.PenStyle.DashLine
-        pen = QPen(color, 1.4, style)
-        self.setPen(pen)
-        self.setBrush(QBrush(Qt.BrushStyle.NoBrush))
+    def __init__(self, pred_id: str, task_id: str, dep_type: str, theme: Theme):
+        super().__init__()
+        self.pred_id, self.task_id, self.dep_type = pred_id, task_id, dep_type
+        self.theme = theme
+        self._base = QColor(theme.arrow_fs if dep_type == FS else theme.arrow_ss)
+        self._hover = False
+        self._shape = QPainterPath()
+        self._bounds = QRectF()
+
         self.setZValue(0.5)
-        self._head: Optional[QGraphicsPolygonItem] = None
         self.setAcceptHoverEvents(True)
+        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, True)
+        self.setToolTip(f"{dep_type} link: {pred_id} \u2192 {task_id}\n"
+                        f"Click to select, then press Delete (or click \u2715) to remove")
 
-    def set_route(self, x1: float, y1: float, x2: float, y2: float):
-        """Draw an elbow path from (x1,y1) to (x2,y2) with an arrowhead at the end."""
-        path = QPainterPath()
-        path.moveTo(x1, y1)
-        mid_x = (x1 + x2) / 2
-        path.lineTo(mid_x, y1)
-        path.lineTo(mid_x, y2)
-        path.lineTo(x2, y2)
-        self.setPath(path)
-        self._draw_arrowhead(x2, y2, mid_x, y2)
-
-    def _draw_arrowhead(self, tip_x: float, tip_y: float, from_x: float, from_y: float):
-        """Draw a solid triangle arrowhead at (tip_x, tip_y) pointing from (from_x, from_y)."""
-        if self._head and self._head.scene():
-            self._head.scene().removeItem(self._head)
-
-        angle = math.atan2(tip_y - from_y, tip_x - from_x)
-        s = ARROW_HEAD_SIZE
-        p1 = QPointF(tip_x - s * math.cos(angle - 0.4), tip_y - s * math.sin(angle - 0.4))
-        p2 = QPointF(tip_x - s * math.cos(angle + 0.4), tip_y - s * math.sin(angle + 0.4))
-        poly = QPolygonF([QPointF(tip_x, tip_y), p1, p2])
-        self._head = QGraphicsPolygonItem(poly)
-        self._head.setBrush(QBrush(self._color))
+        self._head = QGraphicsPolygonItem(self)
         self._head.setPen(QPen(Qt.PenStyle.NoPen))
-        self._head.setZValue(0.6)
-        if self.scene():
-            self.scene().addItem(self._head)
+        self._head.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+        self._badge = DeleteBadge(self)
+        self._badge.setVisible(False)
+        self._restyle()
+
+    # -- geometry ------------------------------------------------------------------
+    def set_points(self, pts: List[QPointF]) -> None:
+        path = QPainterPath(pts[0])
+        for p in pts[1:]:
+            path.lineTo(p)
+        stroker = QPainterPathStroker()
+        stroker.setWidth(HIT_WIDTH)
+        self.prepareGeometryChange()
+        self._shape = stroker.createStroke(path)
+        self._bounds = self._shape.boundingRect().adjusted(-2, -2, 2, 2)
+        self.setPath(path)
+        self._place_head(pts[-2], pts[-1])
+        self._badge.setPos(path.pointAtPercent(0.5))
+
+    def _place_head(self, a: QPointF, b: QPointF) -> None:
+        angle = math.atan2(b.y() - a.y(), b.x() - a.x())
+        s = ARROW_HEAD
+        p1 = QPointF(b.x() - s * math.cos(angle - 0.45), b.y() - s * math.sin(angle - 0.45))
+        p2 = QPointF(b.x() - s * math.cos(angle + 0.45), b.y() - s * math.sin(angle + 0.45))
+        self._head.setPolygon(QPolygonF([b, p1, p2]))
+
+    def shape(self):
+        return self._shape
+
+    def boundingRect(self):
+        return self._bounds
+
+    # -- look ------------------------------------------------------------------------
+    def _restyle(self) -> None:
+        selected = self.isSelected()
+        if selected or self._hover:
+            color, width = QColor(self.theme.link_color), (3.0 if selected else 2.6)
+        else:
+            color, width = self._base, 1.6
+        style = Qt.PenStyle.SolidLine if self.dep_type == FS else Qt.PenStyle.DashLine
+        self.setPen(QPen(color, width, style))
+        self._head.setBrush(QBrush(color))
+        self._badge.setVisible(selected)
+        self.setZValue(5 if selected else 0.5)
+        self.update()
+
+    def paint(self, painter, option, widget=None):
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(self.pen())
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawPath(self.path())
+
+    def itemChange(self, change, value):
+        if change == QGraphicsItem.GraphicsItemChange.ItemSelectedHasChanged:
+            self._restyle()
+        return super().itemChange(change, value)
 
     def hoverEnterEvent(self, event):
-        hl_color = QColor("#2979FF")
-        style = Qt.PenStyle.SolidLine if self.dep_type == "FS" else Qt.PenStyle.DashLine
-        self.setPen(QPen(hl_color, 2.4, style))
-        if self._head:
-            self._head.setBrush(QBrush(hl_color))
-        tip = (
-            f"<b>{self.dep_type} Dependency</b>: <code>{self.pred_id}</code> ➔ <code>{self.task_id}</code><br>"
-            f"<small style='color:#B0BAC4'>Right-click to remove dependency</small>"
-        )
-        QToolTip.showText(QCursor.pos(), tip)
+        self._hover = True
+        self._restyle()
         super().hoverEnterEvent(event)
 
     def hoverLeaveEvent(self, event):
-        style = Qt.PenStyle.SolidLine if self.dep_type == "FS" else Qt.PenStyle.DashLine
-        self.setPen(QPen(self._color, 1.4, style))
-        if self._head:
-            self._head.setBrush(QBrush(self._color))
-        QToolTip.hideText()
+        self._hover = False
+        self._restyle()
         super().hoverLeaveEvent(event)
+
+    # -- actions -----------------------------------------------------------------------
+    def request_delete(self) -> None:
+        sc = self.scene()
+        if isinstance(sc, GanttScene):
+            sc.emit_later(sc.dependency_removed, self.pred_id, self.task_id, self.dep_type)
 
     def contextMenuEvent(self, event):
         menu = QMenu()
-        act_remove = menu.addAction(f"❌ Remove {self.dep_type} Dependency: {self.pred_id} ➔ {self.task_id}")
-        selected = menu.exec(event.screenPos())
-        if selected == act_remove and self.scene():
-            self.scene().dependency_removed.emit(self.pred_id, self.task_id, self.dep_type)
+        act = menu.addAction(f"\u2715  Remove {self.dep_type} link: {self.pred_id} \u2192 {self.task_id}")
+        if menu.exec(event.screenPos()) == act:
+            self.request_delete()
         event.accept()
 
-    def cleanup(self):
-        if self._head and self._head.scene():
-            self._head.scene().removeItem(self._head)
-
 
 # ---------------------------------------------------------------------------
-# Task bar graphics item
+# Link handle + task bar
 # ---------------------------------------------------------------------------
-class TaskBarItem(QGraphicsRectItem):
-    """A single coloured task bar on the Gantt canvas.
+class LinkPort(QGraphicsEllipseItem):
+    """Small handle beside a bar; drag from it onto another bar to link."""
 
-    Supports:
-      - Left-drag on right edge to resize duration
-      - Right-drag to another task to create a dependency link
-    """
-
-    def __init__(
-        self,
-        task: Task,
-        x: float,
-        y: float,
-        w: float,
-        h: float,
-        color: QColor,
-        px_per_s: float,
-        parent=None,
-    ):
-        super().__init__(x, y, w, h, parent)
-        self.task = task
-        self._color = color
-        self._px_per_s = px_per_s
-        self._selected = False
-        self._resizing = False
-        self._resize_start_x: float = 0.0
-        self._orig_duration: float = task.duration
+    def __init__(self, bar: "TaskBarItem", kind: str):
+        super().__init__(-PORT_R, -PORT_R, 2 * PORT_R, 2 * PORT_R, bar)
+        self.bar, self.kind = bar, kind          # kind: "finish" (-> FS) or "start" (-> SS)
+        self._hover = False
+        self.setZValue(3)
         self.setAcceptHoverEvents(True)
-        self.setFlags(
-            QGraphicsItem.GraphicsItemFlag.ItemIsSelectable |
-            QGraphicsItem.GraphicsItemFlag.ItemSendsGeometryChanges
-        )
-        self._apply_style()
+        self.setCursor(QCursor(Qt.CursorShape.CrossCursor))
+        self.setToolTip("Drag onto another task to create a Finish\u2192Start (FS) link"
+                        if kind == "finish" else
+                        "Drag onto another task to create a Start\u2192Start (SS) link")
 
-    # -- Style ----------------------------------------------------------------
-    def _apply_style(self):
-        fill = self._color if not self._selected else SELECT_COLOR
-        self.setBrush(QBrush(fill))
-        border = fill.darker(130)
-        self.setPen(QPen(border, 1.2 if not self._selected else 2.0))
-
-    def set_selected_state(self, selected: bool):
-        self._selected = selected
-        self._apply_style()
-        self.update()
-
-    # -- Hover ----------------------------------------------------------------
-    def _in_resize_zone(self, pos: QPointF) -> bool:
-        return pos.x() >= self.rect().right() - RESIZE_HANDLE_W
-
-    def hoverMoveEvent(self, event):
-        if self._in_resize_zone(event.pos()):
-            self.setCursor(QCursor(Qt.CursorShape.SizeHorCursor))
-        else:
-            self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        super().hoverMoveEvent(event)
+    def paint(self, painter, option, widget=None):
+        th = self.bar.theme
+        color = QColor(th.link_color if self.kind == "finish" else th.arrow_ss)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setBrush(QBrush(color))
+        painter.setPen(QPen(QColor("#FFFFFF") if self._hover else QColor(th.gantt_bg), 2.0 if self._hover else 1.5))
+        r = self.rect()
+        if self._hover:
+            r = r.adjusted(-1.5, -1.5, 1.5, 1.5)
+        painter.drawEllipse(r)
 
     def hoverEnterEvent(self, event):
-        if not self._resizing:
-            self.setBrush(QBrush(self._color.lighter(130)))
-        preds_fs = ", ".join(self.task.predecessors_fs) or "—"
-        preds_ss = ", ".join(self.task.predecessors_ss) or "—"
-        tip = (
-            f"<b>{self.task.name}</b><br>"
-            f"ID: <code>{self.task.id}</code><br>"
-            f"Resource: {self.task.resource}<br>"
-            f"Duration: {self.task.duration:.1f} s<br>"
-            f"Start: {self.task.start_time:.2f} s &nbsp;&nbsp; End: {self.task.end_time:.2f} s<br>"
-            f"<small>FS: {preds_fs}<br>SS: {preds_ss}</small><br>"
-            f"<i style='color:#607D8B'>Drag right edge to resize | Right-click drag to link dependency</i>"
-        )
-        QToolTip.showText(QCursor.pos(), tip)
-        super().hoverEnterEvent(event)
+        self._hover = True
+        self.update()
 
     def hoverLeaveEvent(self, event):
-        if not self._resizing:
-            self._apply_style()
-        self.setCursor(QCursor(Qt.CursorShape.ArrowCursor))
-        QToolTip.hideText()
+        self._hover = False
+        self.update()
+
+    def mousePressEvent(self, event):
+        sc = self.scene()
+        if event.button() == Qt.MouseButton.LeftButton and isinstance(sc, GanttScene):
+            sc.start_linking(self.bar, self.kind, event.scenePos())
+            event.accept()
+        else:
+            event.ignore()
+
+    def mouseMoveEvent(self, event):
+        sc = self.scene()
+        if isinstance(sc, GanttScene) and sc.is_linking():
+            sc.update_linking(event.scenePos())
+        event.accept()
+
+    def mouseReleaseEvent(self, event):
+        sc = self.scene()
+        if event.button() == Qt.MouseButton.LeftButton and isinstance(sc, GanttScene) and sc.is_linking():
+            sc.finish_linking(event.scenePos())
+        event.accept()
+
+
+class TaskBarItem(QGraphicsRectItem):
+    """One task bar.  Right edge resizes; the two side handles start links."""
+
+    def __init__(self, task: Task, x: float, y: float, w: float, h: float,
+                 color: QColor, theme: Theme, px_per_s: float):
+        super().__init__(x, y, w, h)
+        self.task = task
+        self.theme = theme
+        self.row_top = self.row_bottom = y          # set by the scene (used for link routing)
+        self._color = color
+        self._fg = contrast_color(color)
+        self._px = px_per_s
+        self._hover = False
+        self._link_state = ""                       # "", "good", "bad"
+        self._resizing = False
+        self._resize_x0 = 0.0
+        self._resize_w0 = w
+        self._preview = task.duration
+
+        self.setAcceptHoverEvents(True)
+        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, True)
+
+        self._label = QGraphicsSimpleTextItem(self)
+        self._label.setFont(QFont("Segoe UI", 8))
+        self._label.setBrush(QBrush(self._fg))
+        self._label.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+        self._port_finish = LinkPort(self, "finish")
+        self._port_start = LinkPort(self, "start")
+        self._refresh_tooltip()
+        self._relayout()
+
+    # -- geometry helpers ---------------------------------------------------------------
+    def edge_point(self, kind: str) -> QPointF:
+        r = self.rect()
+        return self.mapToScene(QPointF(r.right() if kind == "finish" else r.left(), r.center().y()))
+
+    def _relayout(self) -> None:
+        r = self.rect()
+        cy = r.center().y()
+        self._port_finish.setPos(r.right() + PORT_GAP, cy)
+        self._port_start.setPos(r.left() - PORT_GAP, cy)
+        avail = r.width() - RESIZE_HANDLE_W - 10
+        fm = QFontMetrics(self._label.font())
+        text = fm.elidedText(self.task.name, Qt.TextElideMode.ElideRight, int(avail)) if avail > 20 else ""
+        self._label.setText(text)
+        self._label.setPos(r.left() + 6, r.top() + (r.height() - fm.height()) / 2)
+
+    def _refresh_tooltip(self) -> None:
+        t = self.task
+        dash = "\u2014"
+        fs = ", ".join(t.predecessors_fs) or dash
+        ss = ", ".join(t.predecessors_ss) or dash
+        resource = t.resource or dash
+        times = ""
+        if t.start_time is not None and t.end_time is not None:
+            times = f"Start {t.start_time:.1f}s \u2192 End {t.end_time:.1f}s<br>"
+        self.setToolTip(
+            f"<b>{t.name}</b> <small>({t.id})</small><br>"
+            f"Resource: {resource}<br>Duration: {t.duration:g} s<br>{times}"
+            f"<small>After (FS): {fs}<br>With (SS): {ss}</small><br>"
+            f"<i>Drag the right edge to resize \u2022 drag a side handle to link</i>")
+
+    def set_link_state(self, state: str) -> None:
+        self._link_state = state
+        self.update()
+
+    # -- painting ---------------------------------------------------------------------------
+    def paint(self, painter, option, widget=None):
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        r = self.rect()
+        fill = QColor(self._color)
+        if self._hover and not self._link_state:
+            fill = fill.lighter(112)
+
+        if self._link_state == "good":
+            pen = QPen(QColor(self.theme.link_ok), 3.0)
+        elif self._link_state == "bad":
+            pen = QPen(QColor(self.theme.link_bad), 3.0)
+        elif self.isSelected():
+            pen = QPen(QColor(self.theme.link_color), 2.5)
+        else:
+            pen = QPen(fill.darker(145), 1.2)
+        painter.setBrush(QBrush(fill))
+        painter.setPen(pen)
+        painter.drawRoundedRect(r, 3, 3)
+
+        if r.width() > 28:                      # resize grip
+            grip = QColor(self._fg)
+            grip.setAlpha(120)
+            painter.setPen(QPen(grip, 1.0))
+            x = r.right() - 3.5
+            painter.drawLine(QPointF(x, r.top() + 6), QPointF(x, r.bottom() - 6))
+            painter.drawLine(QPointF(x - 3, r.top() + 6), QPointF(x - 3, r.bottom() - 6))
+
+    # -- hover ---------------------------------------------------------------------------------
+    def _in_resize_zone(self, pos: QPointF) -> bool:
+        r = self.rect()
+        zone = min(RESIZE_HANDLE_W, r.width() / 3.0)
+        return pos.x() >= r.right() - zone
+
+    def hoverEnterEvent(self, event):
+        self._hover = True
+        self.update()
+        super().hoverEnterEvent(event)
+
+    def hoverMoveEvent(self, event):
+        shape = Qt.CursorShape.SizeHorCursor if self._in_resize_zone(event.pos()) else Qt.CursorShape.ArrowCursor
+        self.setCursor(QCursor(shape))
+        super().hoverMoveEvent(event)
+
+    def hoverLeaveEvent(self, event):
+        self._hover = False
+        self.update()
         super().hoverLeaveEvent(event)
 
-    # -- Mouse (resize drag & dependency link drag) ---------------------------
+    # -- resize drag -------------------------------------------------------------------------------
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton and self._in_resize_zone(event.pos()):
             self._resizing = True
-            self._resize_start_x = event.scenePos().x()
-            self._orig_duration = self.task.duration
-            event.accept()
-        elif event.button() == Qt.MouseButton.RightButton:
-            if self.scene() and hasattr(self.scene(), "start_linking"):
-                self.scene().start_linking(self, event.scenePos())
+            self._resize_x0 = event.scenePos().x()
+            self._resize_w0 = self.rect().width()
+            self._preview = self.task.duration
             event.accept()
         else:
             super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
         if self._resizing:
-            delta_x = event.scenePos().x() - self._resize_start_x
-            delta_s = delta_x / self._px_per_s
-            new_dur = max(0.1, self._orig_duration + delta_s)
-            self.task.duration = round(new_dur, 2)
-            # Visually resize the rect
+            new_w = max(2.0, self._resize_w0 + (event.scenePos().x() - self._resize_x0))
+            self._preview = max(0.1, round(new_w / self._px, 1))
             r = self.rect()
-            self.setRect(r.x(), r.y(), new_dur * self._px_per_s, r.height())
-            event.accept()
-        elif self.scene() and hasattr(self.scene(), "is_linking") and self.scene().is_linking():
-            self.scene().update_linking(event.scenePos())
+            self.setRect(r.x(), r.y(), self._preview * self._px, r.height())
+            self._relayout()
             event.accept()
         else:
             super().mouseMoveEvent(event)
@@ -260,13 +406,9 @@ class TaskBarItem(QGraphicsRectItem):
     def mouseReleaseEvent(self, event):
         if self._resizing and event.button() == Qt.MouseButton.LeftButton:
             self._resizing = False
-            self._apply_style()
-            if self.scene():
-                self.scene().task_resized.emit(self.task)
-            event.accept()
-        elif event.button() == Qt.MouseButton.RightButton:
-            if self.scene() and hasattr(self.scene(), "is_linking") and self.scene().is_linking():
-                self.scene().finish_linking(event.scenePos())
+            sc = self.scene()
+            if isinstance(sc, GanttScene) and abs(self._preview - self.task.duration) > 1e-9:
+                sc.emit_later(sc.task_resized, self.task.id, float(self._preview))
             event.accept()
         else:
             super().mouseReleaseEvent(event)
@@ -276,315 +418,456 @@ class TaskBarItem(QGraphicsRectItem):
 # Scene
 # ---------------------------------------------------------------------------
 class GanttScene(QGraphicsScene):
-    """Scene that owns all Gantt items."""
-    task_clicked = pyqtSignal(object)           # emits Task | None
-    task_resized = pyqtSignal(object)           # emits Task after drag-resize release
-    dependency_added = pyqtSignal(str, str, str)   # (from_task_id, to_task_id, dep_type)
-    dependency_removed = pyqtSignal(str, str, str) # (from_task_id, to_task_id, dep_type)
+    task_clicked = pyqtSignal(object)               # Task | None
+    task_resized = pyqtSignal(str, float)           # task_id, new duration
+    dependency_added = pyqtSignal(str, str, str)    # src_id, dst_id, "FS" | "SS"
+    dependency_removed = pyqtSignal(str, str, str)
+    link_hint = pyqtSignal(str)                     # live status text while dragging a link
+    rebuilt = pyqtSignal()
 
-    def __init__(self, parent=None):
+    def __init__(self, theme: Theme = DARK, parent=None):
         super().__init__(parent)
+        self._theme = theme
         self._model: Optional[SequenceModel] = None
-        self._px_per_s: float = DEFAULT_PX_S
-        self._bar_items: List[TaskBarItem] = []
-        self._dep_arrows: List[DependencyArrow] = []
-        self._resource_colors: Dict[str, QColor] = {}
-        self._linking_source_bar: Optional[TaskBarItem] = None
-        self._temp_link_line: Optional[QGraphicsLineItem] = None
+        self._px = DEFAULT_PX_S
+        self._label_w = float(MIN_LABEL_W)
+        self._content_s = 60.0
+        self._selected_task_id: Optional[str] = None
+        self._bars: Dict[str, TaskBarItem] = {}
+        self._grp_x: List[QGraphicsItem] = []        # follow horizontal scroll
+        self._grp_y: List[QGraphicsItem] = []        # follow vertical scroll
+        self._grp_xy: List[QGraphicsItem] = []       # follow both
+        self.link_validator: Optional[Callable[[str, str, str], Tuple[bool, str]]] = None
+        self._reset_link_state()
 
-    # -- Public API ----------------------------------------------------------
-    def set_model(self, model: Optional[SequenceModel], px_per_s: float = DEFAULT_PX_S):
-        self._model = model
-        self._px_per_s = px_per_s
+    def _reset_link_state(self) -> None:
+        self._link_src: Optional[TaskBarItem] = None
+        self._link_kind = ""
+        self._link_line: Optional[QGraphicsLineItem] = None
+        self._hl_bar: Optional[TaskBarItem] = None
+
+    # -- public API ---------------------------------------------------------------------------------
+    def emit_later(self, signal, *args) -> None:
+        QTimer.singleShot(0, lambda: signal.emit(*args))
+
+    def set_theme(self, theme: Theme) -> None:
+        self._theme = theme
         self._rebuild()
 
-    def set_zoom(self, px_per_s: float):
-        self._px_per_s = max(MIN_PX_PER_S, min(MAX_PX_PER_S, px_per_s))
+    def set_model(self, model: Optional[SequenceModel]) -> None:
+        self._model = model
+        self._rebuild()
+
+    def set_zoom(self, px_per_s: float) -> None:
+        px = max(MIN_PX_PER_S, min(MAX_PX_PER_S, px_per_s))
+        if abs(px - self._px) < 1e-6:
+            return
+        self._px = px
         self._rebuild()
 
     def get_zoom(self) -> float:
-        return self._px_per_s
+        return self._px
 
-    def resource_color(self, resource_id: str) -> QColor:
-        return self._resource_colors.get(resource_id, QColor("#888888"))
+    @property
+    def label_width(self) -> float:
+        return self._label_w
 
-    # -- Interactive Linking API ---------------------------------------------
-    def start_linking(self, source_bar: TaskBarItem, start_pos: QPointF):
-        self._linking_source_bar = source_bar
-        rect = source_bar.rect()
-        start_pt = QPointF(rect.right(), rect.center().y())
-        pen = QPen(QColor("#2979FF"), 2.0, Qt.PenStyle.DashLine)
-        self._temp_link_line = self.addLine(QLineF(start_pt, start_pos), pen)
-        self._temp_link_line.setZValue(10)
+    @property
+    def content_seconds(self) -> float:
+        return self._content_s
 
-    def update_linking(self, current_pos: QPointF):
-        if self._temp_link_line and self._linking_source_bar:
-            rect = self._linking_source_bar.rect()
-            start_pt = QPointF(rect.right(), rect.center().y())
-            self._temp_link_line.setLine(QLineF(start_pt, current_pos))
+    def select_task(self, task_id: Optional[str]) -> None:
+        self._selected_task_id = task_id
+        for tid, bar in self._bars.items():
+            bar.setSelected(tid == task_id)
 
+    def update_sticky(self, left: float, top: float) -> None:
+        for item in self._grp_x:
+            item.setX(left)
+        for item in self._grp_y:
+            item.setY(top)
+        for item in self._grp_xy:
+            item.setPos(left, top)
+
+    # -- link dragging ------------------------------------------------------------------------------------
     def is_linking(self) -> bool:
-        return self._linking_source_bar is not None
+        return self._link_src is not None
 
-    def finish_linking(self, end_pos: QPointF):
-        if self._temp_link_line:
-            self.removeItem(self._temp_link_line)
-            self._temp_link_line = None
+    def _dep_type(self) -> str:
+        return FS if self._link_kind == "finish" else SS
 
-        source_bar = self._linking_source_bar
-        self._linking_source_bar = None
-        if not source_bar:
+    def start_linking(self, bar: TaskBarItem, kind: str, pos: QPointF) -> None:
+        self._link_src, self._link_kind = bar, kind
+        pen = QPen(QColor(self._theme.link_color), 2.0, Qt.PenStyle.DashLine)
+        self._link_line = self.addLine(QLineF(bar.edge_point(kind), pos), pen)
+        self._link_line.setZValue(20)
+        self.link_hint.emit("Drop on the task that should follow\u2026")
+
+    def _bar_at(self, pos: QPointF, exclude: Optional[TaskBarItem]) -> Optional[TaskBarItem]:
+        for item in self.items(pos):
+            while item is not None and not isinstance(item, TaskBarItem):
+                item = item.parentItem()
+            if item is not None and item is not exclude:
+                return item
+        return None
+
+    def _validate(self, target: TaskBarItem) -> Tuple[bool, str]:
+        if self.link_validator is None or self._link_src is None:
+            return True, ""
+        return self.link_validator(self._link_src.task.id, target.task.id, self._dep_type())
+
+    def update_linking(self, pos: QPointF) -> None:
+        if self._link_src is None or self._link_line is None:
             return
-
-        target_items = [
-            i for i in self.items(end_pos)
-            if isinstance(i, TaskBarItem) and i != source_bar
-        ]
-        if not target_items:
+        self._link_line.setLine(QLineF(self._link_src.edge_point(self._link_kind), pos))
+        bar = self._bar_at(pos, self._link_src)
+        if bar is self._hl_bar:
             return
+        if self._hl_bar is not None:
+            self._hl_bar.set_link_state("")
+        self._hl_bar = bar
+        if bar is None:
+            self.link_hint.emit("Drop on the task that should follow\u2026")
+            return
+        ok, msg = self._validate(bar)
+        bar.set_link_state("good" if ok else "bad")
+        src = self._link_src.task.id
+        self.link_hint.emit(f"{src} \u2192 {bar.task.id} ({self._dep_type()})" if ok else msg)
 
-        target_bar = target_items[0]
-        src_id = source_bar.task.id
-        dst_id = target_bar.task.id
+    def _end_link_drag(self) -> Tuple[Optional[TaskBarItem], str]:
+        src, kind = self._link_src, self._link_kind
+        if self._link_line is not None:
+            self.removeItem(self._link_line)
+        if self._hl_bar is not None:
+            self._hl_bar.set_link_state("")
+        self._reset_link_state()
+        return src, kind
 
-        menu = QMenu()
-        act_fs = menu.addAction(f"➡ Add Finish-to-Start (FS): {src_id} ➔ {dst_id}")
-        act_ss = menu.addAction(f"⇥ Add Start-to-Start (SS): {src_id} ➔ {dst_id}")
-        menu.addSeparator()
-        act_cancel = menu.addAction("Cancel")
+    def cancel_linking(self) -> None:
+        if self.is_linking():
+            self._end_link_drag()
+            self.link_hint.emit("")
 
-        selected = menu.exec(QCursor.pos())
-        if selected == act_fs:
-            self.dependency_added.emit(src_id, dst_id, "FS")
-        elif selected == act_ss:
-            self.dependency_added.emit(src_id, dst_id, "SS")
+    def finish_linking(self, pos: QPointF) -> None:
+        if self._link_src is None:
+            return
+        target = self._bar_at(pos, self._link_src)
+        dep = self._dep_type()
+        ok, msg = self._validate(target) if target is not None else (False, "")
+        src, _kind = self._end_link_drag()
+        if target is None or src is None:
+            self.link_hint.emit("")
+        elif ok:
+            self.emit_later(self.dependency_added, src.task.id, target.task.id, dep)
+            self.link_hint.emit("")
+        else:
+            self.link_hint.emit(msg)
 
-    # -- Build ----------------------------------------------------------------
-    def _rebuild(self):
-        for arrow in self._dep_arrows:
-            arrow.cleanup()
+    # -- build ----------------------------------------------------------------------------------------------
+    def _rebuild(self) -> None:
+        self._reset_link_state()
         self.clear()
-        self._bar_items.clear()
-        self._dep_arrows.clear()
-        self._linking_source_bar = None
-        self._temp_link_line = None
-
-        if self._model is None:
-            return
+        self._bars = {}
+        self._grp_x, self._grp_y, self._grp_xy = [], [], []
+        th = self._theme
+        self.setBackgroundBrush(QBrush(QColor(th.gantt_bg)))
 
         model = self._model
-        resources = model.resources
-        num_rows = len(resources)
+        if model is None:
+            self.setSceneRect(0, 0, 10, 10)
+            self.rebuilt.emit()
+            return
 
-        self._resource_colors = {}
-        for i, res in enumerate(resources):
-            if res.color and res.color.startswith("#"):
-                self._resource_colors[res.id] = QColor(res.color)
-            else:
-                self._resource_colors[res.id] = QColor(RESOURCE_PALETTE[i % len(RESOURCE_PALETTE)])
+        # ---- rows: one per resource, plus "Unassigned" if needed ---------------------------
+        rid_set = {r.id for r in model.resources}
+        rows: List[Tuple[str, str, QColor]] = []
+        for i, res in enumerate(model.resources):
+            color = QColor(res.color) if res.color and res.color.startswith("#") \
+                else QColor(RESOURCE_PALETTE[i % len(RESOURCE_PALETTE)])
+            rows.append((res.id, res.id, color))
 
-        max_t = max(
-            (t.end_time for t in model.tasks if t.end_time is not None),
-            default=model.settings.takt_time,
-        )
-        takt_t = model.settings.takt_time
-        canvas_w = LABEL_WIDTH + (max(max_t, takt_t) + 5) * self._px_per_s
-        canvas_h = HEADER_H + num_rows * ROW_HEIGHT
+        scheduled = [t for t in model.tasks if t.start_time is not None and t.end_time is not None]
+        by_row: Dict[str, List[Task]] = {key: [] for key, _, _ in rows}
+        orphans = [t for t in scheduled if t.resource not in rid_set]
+        for t in scheduled:
+            if t.resource in rid_set:
+                by_row[t.resource].append(t)
+        if orphans:
+            rows.append(("", "\u26a0 Unassigned", QColor(th.link_bad)))
+            by_row[""] = orphans
 
+        lanes_per_row = [assign_lanes(by_row[key]) for key, _, _ in rows]
+        heights = [2 * ROW_PAD + (LANE_H * n - (LANE_H - BAR_H)) for _, n in lanes_per_row]
+        tops: List[float] = []
+        y = float(HEADER_H)
+        for h in heights:
+            tops.append(y)
+            y += h
+        body_h = y - HEADER_H
+
+        # ---- extents ------------------------------------------------------------------------------
+        label_font = QFont("Segoe UI", 9, QFont.Weight.Bold)
+        fm = QFontMetrics(label_font)
+        text_w = max((fm.horizontalAdvance(lbl) for _, lbl, _ in rows), default=0)
+        self._label_w = float(max(MIN_LABEL_W, min(MAX_LABEL_W, text_w + 30)))
+        lw, px = self._label_w, self._px
+
+        max_t = max((t.end_time for t in scheduled), default=0.0)
+        takt = model.settings.takt_time
+        self._content_s = max(max_t, takt) * 1.04 + 2.0
+        canvas_w = lw + self._content_s * px
+        canvas_h = HEADER_H + max(body_h, 1.0)
         self.setSceneRect(0, 0, canvas_w, canvas_h)
 
-        # Background
-        self.addRect(QRectF(0, 0, canvas_w, canvas_h), QPen(Qt.PenStyle.NoPen), QBrush(BG_COLOR))
+        # ---- body: stripes, grid, separators, takt -----------------------------------------------
+        no_pen = QPen(Qt.PenStyle.NoPen)
+        for i, top in enumerate(tops):
+            stripe = self.addRect(QRectF(0, top, canvas_w, heights[i]), no_pen,
+                                  QBrush(QColor(th.gantt_row_alt if i % 2 else th.gantt_bg)))
+            stripe.setZValue(-10)
 
-        # Header background
-        self.addRect(QRectF(0, 0, canvas_w, HEADER_H), QPen(Qt.PenStyle.NoPen), QBrush(HDR_COLOR))
+        step = nice_tick_step(px)
+        header_items: List[QGraphicsItem] = []
+        tick_font = QFont("Segoe UI", 8)
+        t, n = 0.0, 0
+        while t <= self._content_s + 1e-9:
+            x = lw + t * px
+            strong = (n % 2 == 0)
+            grid = self.addLine(x, HEADER_H, x, canvas_h,
+                                QPen(QColor(th.gantt_grid_strong if strong else th.gantt_grid), 1))
+            grid.setZValue(-9)
+            header_items.append(self.addLine(x, HEADER_H - 5, x, HEADER_H, QPen(QColor(th.gantt_text_muted), 1)))
+            if strong or step * px >= 90:
+                lbl = self.addSimpleText(_fmt_time(t))
+                lbl.setFont(tick_font)
+                lbl.setBrush(QBrush(QColor(th.gantt_text_muted)))
+                lbl.setPos(x + 3, HEADER_H - 22)
+                header_items.append(lbl)
+            t += step
+            n += 1
 
-        # Row stripes
-        for row_i in range(num_rows):
-            y = HEADER_H + row_i * ROW_HEIGHT
-            color = ROW_EVEN if row_i % 2 == 0 else ROW_ALT
-            self.addRect(QRectF(0, y, canvas_w, ROW_HEIGHT), QPen(Qt.PenStyle.NoPen), QBrush(color))
+        sep_pen = QPen(QColor(th.gantt_grid_strong), 1)
+        for top, h in zip(tops, heights):
+            self.addLine(0, top + h, canvas_w, top + h, sep_pen).setZValue(-8)
 
-        # Grid + tick labels
-        self._draw_grid(canvas_h, max(max_t, takt_t) + 5)
+        takt_x = lw + takt * px
+        takt_line = self.addLine(takt_x, HEADER_H, takt_x, canvas_h, QPen(QColor(COMAU_RED), 2, Qt.PenStyle.DashLine))
+        takt_line.setZValue(-1)
+        takt_lbl = self.addSimpleText(f"Takt {takt:g}s")
+        takt_lbl.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold))
+        takt_lbl.setBrush(QBrush(QColor(COMAU_RED)))
+        takt_lbl.setPos(takt_x + 4, 2)
+        header_items.append(takt_lbl)
 
-        # Label column background
-        self.addRect(QRectF(0, 0, LABEL_WIDTH, canvas_h), QPen(Qt.PenStyle.NoPen), QBrush(QColor(EXEC_NAVY)))
-        self.addLine(LABEL_WIDTH, 0, LABEL_WIDTH, canvas_h, QPen(GRID_COLOR, 1))
+        # ---- bars -----------------------------------------------------------------------------------
+        for i, (key, _lbl, color) in enumerate(rows):
+            lanes, _n = lanes_per_row[i]
+            for task in by_row[key]:
+                bx = lw + task.start_time * px
+                by = tops[i] + ROW_PAD + lanes[task.id] * LANE_H
+                bar = TaskBarItem(task, bx, by, max(task.duration * px, 2.0), BAR_H, color, th, px)
+                bar.row_top, bar.row_bottom = tops[i], tops[i] + heights[i]
+                bar.setZValue(1)
+                self.addItem(bar)
+                self._bars[task.id] = bar
+                if task.id == self._selected_task_id:
+                    bar.setSelected(True)
 
-        resource_index: Dict[str, int] = {res.id: i for i, res in enumerate(resources)}
-        bar_map: Dict[str, TaskBarItem] = {}
+        self._draw_links(model)
 
-        for row_i, res in enumerate(resources):
-            y = HEADER_H + row_i * ROW_HEIGHT
-            self.addLine(0, y, canvas_w, y, QPen(GRID_COLOR, 0.5))
-            lbl = self.addText(res.id)
-            lbl.setDefaultTextColor(QColor(res.color if res.color else SILVER))
-            lbl.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
-            lbl.setPos(8, y + (ROW_HEIGHT - lbl.boundingRect().height()) / 2)
+        # ---- sticky header / resource column / corner ----------------------------------------
+        hdr_bg = self.addRect(QRectF(0, 0, canvas_w, HEADER_H), no_pen, QBrush(QColor(th.gantt_header_bg)))
+        hdr_line = self.addLine(0, HEADER_H, canvas_w, HEADER_H, QPen(QColor(th.gantt_grid_strong), 1))
+        hdr_bg.setZValue(-1)
+        header_group = self.createItemGroup([hdr_bg, hdr_line] + header_items)
+        header_group.setZValue(6)
+        self._grp_y.append(header_group)
 
-        # Takt line
-        takt_x = LABEL_WIDTH + takt_t * self._px_per_s
-        self.addLine(takt_x, 0, takt_x, canvas_h, QPen(TAKT_COLOR, 2, Qt.PenStyle.DashLine))
-        takt_lbl = self.addSimpleText(f"Takt {takt_t:.0f}s")
-        takt_lbl.setFont(QFont("Segoe UI", 8))
-        takt_lbl.setBrush(QBrush(TAKT_COLOR))
-        takt_lbl.setPos(takt_x + 3, 4)
+        col_items: List[QGraphicsItem] = []
+        col_items.append(self.addRect(QRectF(0, HEADER_H, lw, max(body_h, 1.0)), no_pen, QBrush(QColor(th.gantt_label_bg))))
+        col_items.append(self.addLine(lw, HEADER_H, lw, canvas_h, QPen(QColor(th.gantt_grid_strong), 1)))
+        for i, (_key, label, color) in enumerate(rows):
+            chip = self.addRect(QRectF(0, tops[i] + 5, 5, heights[i] - 10), no_pen, QBrush(color))
+            text = self.addSimpleText(fm.elidedText(label, Qt.TextElideMode.ElideRight, int(lw - 22)))
+            text.setFont(label_font)
+            text.setBrush(QBrush(QColor(th.gantt_text)))
+            text.setPos(12, tops[i] + (heights[i] - fm.height()) / 2)
+            text.setToolTip(label)
+            col_items += [chip, text]
+            col_items.append(self.addLine(0, tops[i] + heights[i], lw, tops[i] + heights[i],
+                                          QPen(QColor(th.gantt_grid_strong), 1)))
+        col_group = self.createItemGroup(col_items)
+        col_group.setZValue(5)
+        self._grp_x.append(col_group)
 
-        # Task bars
+        corner_bg = self.addRect(QRectF(0, 0, lw, HEADER_H), no_pen, QBrush(QColor(th.gantt_header_bg)))
+        corner_txt = self.addSimpleText("RESOURCE")
+        corner_txt.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold))
+        corner_txt.setBrush(QBrush(QColor(th.gantt_text_muted)))
+        corner_txt.setPos(12, (HEADER_H - QFontMetrics(corner_txt.font()).height()) / 2)
+        corner_lines = [self.addLine(lw, 0, lw, HEADER_H, QPen(QColor(th.gantt_grid_strong), 1)),
+                        self.addLine(0, HEADER_H, lw, HEADER_H, QPen(QColor(th.gantt_grid_strong), 1))]
+        corner = self.createItemGroup([corner_bg, corner_txt] + corner_lines)
+        corner.setZValue(7)
+        self._grp_xy.append(corner)
+
+        self.rebuilt.emit()
+
+    # -- links ------------------------------------------------------------------------------------------------
+    def _route(self, kind: str, src: TaskBarItem, dst: TaskBarItem) -> List[QPointF]:
+        rs, rd = src.rect(), dst.rect()
+        y1, y2 = rs.center().y(), rd.center().y()
+        x2 = rd.left()
+        if kind == SS:
+            x1 = rs.left()
+            cx = min(x1, x2) - ROUTE_GAP
+            return [QPointF(x1, y1), QPointF(cx, y1), QPointF(cx, y2), QPointF(x2, y2)]
+
+        x1 = rs.right()
+        if x2 - x1 >= 2 * ROUTE_GAP:                    # normal elbow
+            mx = (x1 + x2) / 2.0
+            return [QPointF(x1, y1), QPointF(mx, y1), QPointF(mx, y2), QPointF(x2, y2)]
+        # target starts before the source ends: go round through the row gap
+        if abs(y2 - y1) < 1.0:
+            ymid = y1 + LANE_H / 2.0
+        else:
+            ymid = src.row_bottom if y2 > y1 else src.row_top
+        return [QPointF(x1, y1), QPointF(x1 + ROUTE_GAP, y1), QPointF(x1 + ROUTE_GAP, ymid),
+                QPointF(x2 - ROUTE_GAP, ymid), QPointF(x2 - ROUTE_GAP, y2), QPointF(x2, y2)]
+
+    def _draw_links(self, model: SequenceModel) -> None:
         for task in model.tasks:
-            if task.start_time is None or task.end_time is None:
+            dst = self._bars.get(task.id)
+            if dst is None:
                 continue
-            row_i = resource_index.get(task.resource)
-            if row_i is None:
-                continue
-            color = self._resource_colors.get(task.resource, QColor("#888888"))
-            x = LABEL_WIDTH + task.start_time * self._px_per_s
-            y = HEADER_H + row_i * ROW_HEIGHT + ROW_PADDING
-            w = max(task.duration * self._px_per_s, 2)
-            h = ROW_HEIGHT - 2 * ROW_PADDING
-            bar = TaskBarItem(task, x, y, w, h, color, self._px_per_s)
-            self.addItem(bar)
-            self._bar_items.append(bar)
-            bar_map[task.id] = bar
+            for kind, preds in ((FS, task.predecessors_fs), (SS, task.predecessors_ss)):
+                for pred_id in preds:
+                    src = self._bars.get(pred_id)
+                    if src is None:
+                        continue
+                    arrow = DependencyArrow(pred_id, task.id, kind, self._theme)
+                    self.addItem(arrow)
+                    arrow.set_points(self._route(kind, src, dst))
 
-            # Inline label
-            if w > 30:
-                label_text = task.name[:20] + ("…" if len(task.name) > 20 else "")
-                lbl2 = self.addSimpleText(label_text)
-                lbl2.setFont(QFont("Segoe UI", 7))
-                lbl2.setBrush(QBrush(QColor(WHITE)))
-                lbl2.setPos(x + 4, y + (h - lbl2.boundingRect().height()) / 2)
-                lbl2.setZValue(1)
-
-            # Resize handle visual (tinted grip)
-            handle = self.addRect(
-                QRectF(x + w - RESIZE_HANDLE_W, y + 2, RESIZE_HANDLE_W, h - 4),
-                QPen(Qt.PenStyle.NoPen),
-                QBrush(QColor(255, 255, 255, 30)),
-            )
-            handle.setZValue(1.5)
-
-        # Dependency arrows
-        self._draw_dependency_arrows(model, bar_map, resource_index)
-
-        # Bottom border
-        self.addLine(0, canvas_h, canvas_w, canvas_h, QPen(GRID_COLOR, 1))
-
-    def _draw_dependency_arrows(
-        self,
-        model: SequenceModel,
-        bar_map: Dict[str, TaskBarItem],
-        resource_index: Dict[str, int],
-    ):
-        task_map = {t.id: t for t in model.tasks}
-
-        for task in model.tasks:
-            dest_bar = bar_map.get(task.id)
-            if dest_bar is None:
-                continue
-            dest_row = resource_index.get(task.resource)
-            if dest_row is None:
-                continue
-
-            dest_x = dest_bar.rect().x()                              # left edge of destination
-            dest_y = HEADER_H + dest_row * ROW_HEIGHT + ROW_HEIGHT / 2
-
-            # Finish-to-Start arrows (solid, grey)
-            for pred_id in task.predecessors_fs:
-                src_bar = bar_map.get(pred_id)
-                src_task = task_map.get(pred_id)
-                if src_bar is None or src_task is None:
-                    continue
-                src_row = resource_index.get(src_task.resource)
-                if src_row is None:
-                    continue
-                src_x = src_bar.rect().right()                        # right edge of source
-                src_y = HEADER_H + src_row * ROW_HEIGHT + ROW_HEIGHT / 2
-                arrow = DependencyArrow(pred_id, task.id, "FS", FS_ARROW_COLOR)
-                self.addItem(arrow)
-                arrow.set_route(src_x, src_y, dest_x, dest_y)
-                self._dep_arrows.append(arrow)
-
-            # Start-to-Start arrows (dashed, amber)
-            for pred_id in task.predecessors_ss:
-                src_bar = bar_map.get(pred_id)
-                src_task = task_map.get(pred_id)
-                if src_bar is None or src_task is None:
-                    continue
-                src_row = resource_index.get(src_task.resource)
-                if src_row is None:
-                    continue
-                src_x = src_bar.rect().x()                            # left edge of source
-                src_y = HEADER_H + src_row * ROW_HEIGHT + ROW_HEIGHT / 2
-                arrow = DependencyArrow(pred_id, task.id, "SS", SS_ARROW_COLOR)
-                self.addItem(arrow)
-                arrow.set_route(src_x, src_y, dest_x, dest_y)
-                self._dep_arrows.append(arrow)
-
-    def _draw_grid(self, canvas_h: float, display_max: float):
-        font_small = QFont("Segoe UI", 8)
-        pen_major = QPen(QColor("#1E3A54"), 1)
-        pen_minor = QPen(QColor("#152838"), 1)
-        t = 0.0
-        while t <= display_max:
-            x = LABEL_WIDTH + t * self._px_per_s
-            pen = pen_major if t % 10 == 0 else pen_minor
-            self.addLine(x, HEADER_H, x, canvas_h, pen)
-            lbl = self.addSimpleText(f"{t:.0f}s")
-            lbl.setFont(font_small)
-            lbl.setBrush(QBrush(QColor(SILVER)))
-            lbl.setPos(x - lbl.boundingRect().width() / 2, HEADER_H - 20)
-            self.addLine(x, HEADER_H - 4, x, HEADER_H, QPen(QColor(SILVER), 1))
-            t += TICK_MAJOR
-
-    # -- Mouse ---------------------------------------------------------------
+    # -- mouse -----------------------------------------------------------------------------------------------------
     def mousePressEvent(self, event):
         super().mousePressEvent(event)
-        items = self.selectedItems()
-        bar_items_selected = [i for i in items if isinstance(i, TaskBarItem)]
-        for item in self._bar_items:
-            item.set_selected_state(item in bar_items_selected)
-        clicked = bar_items_selected[0].task if bar_items_selected else None
-        self.task_clicked.emit(clicked)
+        for view in self.views():
+            view.setFocus()
+        if event.button() != Qt.MouseButton.LeftButton or self.is_linking():
+            return
+        bars = [i for i in self.selectedItems() if isinstance(i, TaskBarItem)]
+        self._selected_task_id = bars[0].task.id if bars else None
+        self.task_clicked.emit(bars[0].task if bars else None)
 
 
 # ---------------------------------------------------------------------------
 # View
 # ---------------------------------------------------------------------------
 class GanttView(QGraphicsView):
-    """QGraphicsView wrapper with zoom (Ctrl+Scroll) and pan support."""
-
     task_clicked = pyqtSignal(object)
-    task_resized = pyqtSignal(object)
+    task_resized = pyqtSignal(str, float)
     dependency_added = pyqtSignal(str, str, str)
     dependency_removed = pyqtSignal(str, str, str)
+    link_hint = pyqtSignal(str)
 
-    def __init__(self, parent=None):
+    def __init__(self, theme: Theme = DARK, parent=None):
         super().__init__(parent)
-        self._scene = GanttScene()
+        self._scene = GanttScene(theme)
+        self.setScene(self._scene)
         self._scene.task_clicked.connect(self.task_clicked)
         self._scene.task_resized.connect(self.task_resized)
         self._scene.dependency_added.connect(self.dependency_added)
         self._scene.dependency_removed.connect(self.dependency_removed)
-        self.setScene(self._scene)
+        self._scene.link_hint.connect(self.link_hint)
+        self._scene.rebuilt.connect(self._on_rebuilt)
+
+        self._fit_mode = True
+        self._fit_timer = QTimer(self)
+        self._fit_timer.setSingleShot(True)
+        self._fit_timer.setInterval(40)
+        self._fit_timer.timeout.connect(self._apply_fit)
+
+        self.setFrameShape(QFrame.Shape.NoFrame)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
         self.setRenderHint(QPainter.RenderHint.Antialiasing)
         self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
-        self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
-        self.setResizeAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
-        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
-        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
-        self.setStyleSheet("background-color: #0D1B2A; border: none;")
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.setBackgroundBrush(QBrush(QColor(theme.gantt_bg)))
 
-    def load_model(self, model: Optional[SequenceModel]):
+    # -- API ----------------------------------------------------------------------------------------------
+    def set_link_validator(self, fn: Callable[[str, str, str], Tuple[bool, str]]) -> None:
+        self._scene.link_validator = fn
+
+    def set_theme(self, theme: Theme) -> None:
+        self.setBackgroundBrush(QBrush(QColor(theme.gantt_bg)))
+        self._scene.set_theme(theme)
+
+    def load_model(self, model: Optional[SequenceModel]) -> None:
         self._scene.set_model(model)
+        if self._fit_mode:
+            self._apply_fit()
+
+    def select_task(self, task_id: Optional[str]) -> None:
+        self._scene.select_task(task_id)
+
+    def zoom_by(self, factor: float) -> None:
+        self._fit_mode = False
+        self._scene.set_zoom(self._scene.get_zoom() * factor)
+
+    def reset_zoom(self) -> None:
+        self._fit_mode = False
+        self._scene.set_zoom(DEFAULT_PX_S)
+
+    def fit_to_window(self) -> None:
+        self._fit_mode = True
+        self._apply_fit()
+
+    # -- internals --------------------------------------------------------------------------------------------
+    def _apply_fit(self) -> None:
+        avail = self.viewport().width() - self._scene.label_width - 12
+        secs = self._scene.content_seconds
+        if avail > 0 and secs > 0:
+            self._scene.set_zoom(avail / secs)
+
+    def _on_rebuilt(self) -> None:
+        self._sync_sticky()
+        QTimer.singleShot(0, self._sync_sticky)
+
+    def _sync_sticky(self) -> None:
+        top_left = self.mapToScene(0, 0)
+        self._scene.update_sticky(max(0.0, top_left.x()), max(0.0, top_left.y()))
+
+    def scrollContentsBy(self, dx, dy):
+        super().scrollContentsBy(dx, dy)
+        self._sync_sticky()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if self._fit_mode:
+            self._fit_timer.start()
+        self._sync_sticky()
 
     def wheelEvent(self, event):
         if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
-            factor = 1.15 if event.angleDelta().y() > 0 else 1 / 1.15
-            self._scene.set_zoom(self._scene.get_zoom() * factor)
+            self.zoom_by(1.15 if event.angleDelta().y() > 0 else 1 / 1.15)
+            event.accept()
         else:
             super().wheelEvent(event)
 
-    def resource_color(self, resource_id: str) -> QColor:
-        return self._scene.resource_color(resource_id)
+    def keyPressEvent(self, event):
+        key = event.key()
+        if key in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
+            arrows = [i for i in self._scene.selectedItems() if isinstance(i, DependencyArrow)]
+            for a in arrows:
+                a.request_delete()
+            if arrows:
+                event.accept()
+                return
+        elif key == Qt.Key.Key_Escape and self._scene.is_linking():
+            self._scene.cancel_linking()
+            event.accept()
+            return
+        super().keyPressEvent(event)

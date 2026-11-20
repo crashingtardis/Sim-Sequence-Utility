@@ -410,3 +410,46 @@ Committed as `c35e0f8` and pushed to `main`.
    - Added unit tests in `tests/test_excel_loader.py` for direct and auto-dispatch loading.
    - All 21 tests pass (`pytest tests/`).
    - Verified smoke test of `MainWindow._load_sample_honda()` using Qt offscreen platform.
+
+---
+
+## Session 10 — UI Overhaul, Dropdowns, Link Dragging, Theme Toggle & Cleanup
+
+**User:**
+> `I want to work on the UI and clean up the codebase.`
+> `Any added tasks or resources should populate in dropdowns for any of the other tabs to be able to be used.`
+> `In the gantt viewer, I want to easily be able to drag arrows to create operation links and easily delete them as well if needed.`
+> `There are also UI issues overlapping text and specific panes in the application not being adjustable or fitting to a window size.`
+> `I also want a dark vs light mode toggle.`
+>
+> Standing instructions: keep the sequence utility compatible with importing Siemens Process Simulate cycle-time reports (sample `7W072_*` files supplied); Excel reports exported from the utility must be re-importable and presentable to customers; always update CHANGELOG.md, README.md and conversationhistory.md.
+
+### Root-cause analysis of the reported UI problems
+
+| Symptom | Cause found in the code |
+|---|---|
+| Overlapping text in KPI bar | Fixed-height single-row layout with 5 cards + legend + badge, wider than the right pane |
+| Window grows / label clipped | Long status text in a `QLabel` added to the status bar raises the minimum width |
+| Left pane not adjustable | `setMaximumWidth(560)`; resource table `setFixedHeight(130)`; 680 px of fixed task-column widths |
+| Opaque boxes behind text | Blanket `QWidget { background-color }` rule applied to every label |
+| Gantt text overlap | Inline labels not clipped to bars; tick labels every 5 s regardless of zoom; resource column scrolled away with the canvas; parallel tasks on one resource drawn on top of each other |
+| Arrows hard to click / delete | 1.4 px path used as hit area; only a right-click menu; link creation needed right-click-drag then a popup |
+| Tasks vanish from Gantt | Tasks with an empty / unknown resource were silently skipped |
+| Table stale after resize | Drag-resize mutated the task but only rescheduled; table not refreshed |
+| Possible crash | A second scheduling run replaced the still-running `QThread` |
+
+### What was built — v0.9.0
+
+1. **`sim_sequence/graph_ops.py`** (pure, tested): link validation (self / duplicate / cycle / unknown), predecessor candidate filtering, renames and removals that keep references consistent, unique IDs, Gantt lane assignment, tick step selection. `tests/test_graph_ops.py`: 13 tests passing.
+2. **`studio/project_store.py`**: one shared store; Resources / Tasks panels, delegates and Gantt are views of it.
+3. **`studio/task_panel.py`**: resource dropdown delegate; checkable multi-select predecessor dropdown; colour swatch delegate; Delete-key shortcuts; header tooltips.
+4. **`studio/gantt_canvas.py`** (rewritten): link handles + drag-to-link with live valid/invalid feedback, selectable wide-hit links with ✕ badge and Delete key, sticky resource column / header, lane stacking, elided bar text, adaptive ticks, fit-to-window, Unassigned row, deferred signal emission (scene rebuilds inside handlers would otherwise delete the running item).
+5. **`studio/theme.py`**: `Theme` dataclass, DARK and LIGHT palettes, stylesheet generated from a template; `contrast_color()` for legible text on any bar colour.
+6. **`studio/flow_layout.py`, `kpi_bar.py`, `gantt_toolbar.py`, `settings_panel.py`, `main_window.py`, `studio_app.py`**: wrapping layouts, no size caps, remembered geometry, theme toggle, auto-run, synchronous scheduling.
+7. **Cleanup**: removed dead / generated files, split requirements, `.gitignore` for build outputs, stale Honda references removed from docs.
+
+### Verification and honesty note
+
+- PyQt6 was not installable in the authoring sandbox (no network), so **no visual testing was possible**. What was verified: all modules compile and import against a stub Qt; the store and table-model logic (add/rename/remove resources and tasks, cycle-safe predecessor edits, validation, link add/remove) were exercised end-to-end through the stub; the stylesheet template was checked for unsubstituted placeholders; the 13 new pure tests pass.
+- **Not yet done**: Siemens Process Simulate cycle-time report import and a re-importable, customer-presentable Excel export (the supplied `7W072_*` workbooks have not yet been analysed). Planned as the next session.
+

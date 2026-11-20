@@ -9,7 +9,7 @@ from __future__ import annotations
 from PyQt6.QtCore import pyqtSignal
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QFormLayout,
-    QDoubleSpinBox, QLineEdit, QLabel, QGroupBox,
+    QDoubleSpinBox, QLineEdit, QGroupBox,
 )
 
 from sim_sequence.models import GlobalSettings
@@ -26,11 +26,14 @@ class SettingsPanel(QWidget):
 
     def _build_ui(self):
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setContentsMargins(6, 6, 6, 6)
 
         grp = QGroupBox("Project Settings")
         form = QFormLayout(grp)
         form.setSpacing(8)
+        # Let fields grow with the pane and wrap labels above fields when narrow.
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
 
         self._avail = QDoubleSpinBox()
         self._avail.setRange(0, 86400); self._avail.setSuffix(" s"); self._avail.setDecimals(1)

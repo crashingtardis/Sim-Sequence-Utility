@@ -1,326 +1,514 @@
 """
-task_panel.py — Left-panel tree: Resources and Tasks editor.
+task_panel.py — Resources and Tasks editors.
 
-Provides:
-  - ResourceModel / TaskModel table models for editing
-  - ResourcePanel (QWidget with Add/Remove/colour-pick)
-  - TaskPanel    (QWidget with Add/Remove/predecessor combos)
+Both panels are views over a shared :class:`ProjectStore`.  Cells that refer
+to other rows use dropdown delegates that are rebuilt from the store every
+time they open, so newly added resources / tasks are always selectable:
+
+  * Task ▸ Resource            single-select dropdown of all resources
+  * Task ▸ FS / SS predecessors multi-select (checkable) dropdown of all
+                               tasks that can legally be a predecessor
+                               (never itself, never something that would
+                               create a circular dependency)
 """
 
 from __future__ import annotations
 
 from typing import List, Optional
 
-from PyQt6.QtCore import (Qt, QAbstractTableModel, QModelIndex,
-                           pyqtSignal, QVariant)
-from PyQt6.QtGui import QColor, QBrush, QFont, QIcon
-from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
-    QTableView, QHeaderView, QAbstractItemView, QColorDialog,
-    QLabel, QSizePolicy, QFrame, QStyledItemDelegate,
-    QMessageBox,
-)
+from PyQt6.QtCore import (QAbstractTableModel, QEvent, QModelIndex, Qt,
+                          QTimer, pyqtSignal)
+from PyQt6.QtGui import (QColor, QKeySequence, QPainter, QPen, QShortcut,
+                         QStandardItem, QStandardItemModel)
+from PyQt6.QtWidgets import (QAbstractItemDelegate, QAbstractItemView,
+                             QColorDialog, QComboBox, QHBoxLayout,
+                             QHeaderView, QLabel, QMessageBox, QPushButton,
+                             QStyledItemDelegate, QTableView, QVBoxLayout,
+                             QWidget)
 
-from sim_sequence.models import Resource, Task
-from .theme import COMAU_RED, SILVER, WHITE, RESOURCE_PALETTE
+from .project_store import ProjectStore
+from .theme import contrast_color
+
+_ROW_H = 28
+_DANGER = QColor("#E74C3C")
+_NO_HINT = QAbstractItemDelegate.EndEditHint.NoHint
 
 
 # ---------------------------------------------------------------------------
-# Colour swatch delegate
+# Delegates
 # ---------------------------------------------------------------------------
 class ColourSwatchDelegate(QStyledItemDelegate):
-    """Renders a coloured rectangle for the colour column."""
+    """Paints the colour column as a rounded swatch with its hex code."""
 
     def paint(self, painter, option, index):
-        super().paint(painter, option, index)
         hex_color = index.data(Qt.ItemDataRole.DisplayRole)
-        if hex_color and hex_color.startswith("#"):
-            rect = option.rect.adjusted(6, 4, -6, -4)
-            painter.fillRect(rect, QColor(hex_color))
+        if not (hex_color and str(hex_color).startswith("#")):
+            super().paint(painter, option, index)
+            return
+        color = QColor(hex_color)
+        rect = option.rect.adjusted(4, 3, -4, -3)
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setBrush(color)
+        painter.setPen(QPen(QColor(0, 0, 0, 70)))
+        painter.drawRoundedRect(rect, 3, 3)
+        painter.setPen(contrast_color(color))
+        painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, str(hex_color).upper())
+        painter.restore()
 
 
-# ---------------------------------------------------------------------------
-# Resource table model
-# ---------------------------------------------------------------------------
-class ResourceTableModel(QAbstractTableModel):
-    COLUMNS = ["ID", "Color"]
+class ResourceComboDelegate(QStyledItemDelegate):
+    """Dropdown of every resource currently defined in the project."""
 
-    def __init__(self, resources: List[Resource], parent=None):
+    def __init__(self, store: ProjectStore, parent=None):
         super().__init__(parent)
-        self._data: List[Resource] = list(resources)
+        self._store = store
 
-    def rowCount(self, _=QModelIndex()): return len(self._data)
-    def columnCount(self, _=QModelIndex()): return len(self.COLUMNS)
+    def createEditor(self, parent, option, index):
+        combo = QComboBox(parent)
+        combo.addItems(self._store.resource_ids())
+        combo.activated.connect(lambda _i, c=combo: self._finish(c))
+        QTimer.singleShot(0, lambda c=combo: self._open_popup(c))
+        return combo
+
+    @staticmethod
+    def _open_popup(combo):
+        try:
+            combo.showPopup()
+        except RuntimeError:      # editor already destroyed
+            pass
+
+    def _finish(self, combo):
+        self.commitData.emit(combo)
+        self.closeEditor.emit(combo, _NO_HINT)
+
+    def setEditorData(self, editor, index):
+        current = str(index.data(Qt.ItemDataRole.EditRole) or "")
+        pos = editor.findText(current)
+        if pos < 0 and current:                  # dangling reference: keep it visible
+            editor.insertItem(0, current)
+            pos = 0
+        editor.setCurrentIndex(max(pos, 0))
+
+    def setModelData(self, editor, model, index):
+        model.setData(index, editor.currentText(), Qt.ItemDataRole.EditRole)
+
+
+class CheckableComboBox(QComboBox):
+    """A combo box whose popup items are tick-boxes; the popup stays open
+    while ticking so several items can be chosen in one go."""
+
+    popupClosed = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._model = QStandardItemModel(self)
+        self.setModel(self._model)
+        self.setEditable(True)
+        self.lineEdit().setReadOnly(True)
+        self.view().setItemDelegate(QStyledItemDelegate(self.view()))   # draws the tick-boxes
+        self.view().pressed.connect(self._toggle)
+        self.view().viewport().installEventFilter(self)
+        self._model.itemChanged.connect(lambda _i: self._update_text())
+
+    def set_items(self, items: List[str], checked: List[str]) -> None:
+        self._model.blockSignals(True)
+        self._model.clear()
+        for text in items:
+            item = QStandardItem(text)
+            item.setFlags(Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled)
+            item.setCheckState(Qt.CheckState.Checked if text in checked else Qt.CheckState.Unchecked)
+            self._model.appendRow(item)
+        self._model.blockSignals(False)
+        self._update_text()
+
+    def checked_items(self) -> List[str]:
+        out = []
+        for row in range(self._model.rowCount()):
+            item = self._model.item(row)
+            if item.checkState() == Qt.CheckState.Checked:
+                out.append(item.text())
+        return out
+
+    def _toggle(self, index):
+        item = self._model.itemFromIndex(index)
+        if item is not None:
+            item.setCheckState(Qt.CheckState.Unchecked
+                               if item.checkState() == Qt.CheckState.Checked
+                               else Qt.CheckState.Checked)
+
+    def _update_text(self):
+        self.lineEdit().setText(", ".join(self.checked_items()))
+
+    def eventFilter(self, obj, event):
+        # Swallow the release so the popup doesn't close after each tick.
+        if obj is self.view().viewport() and event.type() == QEvent.Type.MouseButtonRelease:
+            return True
+        return super().eventFilter(obj, event)
+
+    def hidePopup(self):
+        super().hidePopup()
+        self.popupClosed.emit()
+
+
+class PredecessorDelegate(QStyledItemDelegate):
+    """Multi-select dropdown of tasks that may be a predecessor of this row."""
+
+    def __init__(self, store: ProjectStore, parent=None):
+        super().__init__(parent)
+        self._store = store
+
+    def createEditor(self, parent, option, index):
+        combo = CheckableComboBox(parent)
+        combo._finished = False
+        combo.popupClosed.connect(lambda c=combo: self._finish(c))
+        QTimer.singleShot(0, lambda c=combo: self._open_popup(c))
+        return combo
+
+    @staticmethod
+    def _open_popup(combo):
+        try:
+            combo.showPopup()
+        except RuntimeError:
+            pass
+
+    def _finish(self, combo):
+        if getattr(combo, "_finished", True):
+            return
+        combo._finished = True
+        self.commitData.emit(combo)
+        self.closeEditor.emit(combo, _NO_HINT)
+
+    def setEditorData(self, editor, index):
+        current = [p.strip() for p in str(index.data(Qt.ItemDataRole.EditRole) or "").split(",") if p.strip()]
+        candidates = self._store.candidate_predecessors(index.row())
+        extras = [c for c in current if c not in candidates]     # keep unknown refs visible
+        editor.set_items(candidates + extras, current)
+
+    def setModelData(self, editor, model, index):
+        model.setData(index, ", ".join(editor.checked_items()), Qt.ItemDataRole.EditRole)
+
+
+# ---------------------------------------------------------------------------
+# Table models (thin views over the store)
+# ---------------------------------------------------------------------------
+class _StoreModel(QAbstractTableModel):
+    rejected = pyqtSignal(str)
+
+    def __init__(self, store: ProjectStore, parent=None):
+        super().__init__(parent)
+        self._store = store
+        store.structure_changed.connect(self._on_structure)
+        store.data_changed.connect(self._on_data)
+
+    def _on_structure(self):
+        self.beginResetModel()
+        self.endResetModel()
+
+    def _on_data(self):
+        if self.rowCount():
+            self.dataChanged.emit(self.index(0, 0),
+                                  self.index(self.rowCount() - 1, self.columnCount() - 1))
+
+
+class ResourceTableModel(_StoreModel):
+    COLUMNS = ["Resource ID", "Colour"]
+
+    def rowCount(self, _=QModelIndex()):
+        return len(self._store.resources)
+
+    def columnCount(self, _=QModelIndex()):
+        return len(self.COLUMNS)
 
     def headerData(self, section, orientation, role=Qt.ItemDataRole.DisplayRole):
         if orientation == Qt.Orientation.Horizontal and role == Qt.ItemDataRole.DisplayRole:
             return self.COLUMNS[section]
+        return None
 
     def data(self, index, role=Qt.ItemDataRole.DisplayRole):
-        if not index.isValid(): return None
-        r = self._data[index.row()]
-        if role == Qt.ItemDataRole.DisplayRole:
-            return [r.id, r.color or ""][index.column()]
-        if role == Qt.ItemDataRole.BackgroundRole and index.column() == 1:
-            if r.color: return QBrush(QColor(r.color))
-        if role == Qt.ItemDataRole.ForegroundRole:
-            return QBrush(QColor(WHITE))
+        if not index.isValid():
+            return None
+        res = self._store.resources[index.row()]
+        if role in (Qt.ItemDataRole.DisplayRole, Qt.ItemDataRole.EditRole):
+            return res.id if index.column() == 0 else (res.color or "")
+        if role == Qt.ItemDataRole.ToolTipRole and index.column() == 1:
+            return "Double-click to change colour"
         return None
 
     def setData(self, index, value, role=Qt.ItemDataRole.EditRole):
-        if not index.isValid() or role != Qt.ItemDataRole.EditRole: return False
-        r = self._data[index.row()]
-        if index.column() == 0:
-            r.id = str(value).strip()
-        elif index.column() == 1:
-            r.color = str(value).strip()
-        self.dataChanged.emit(index, index)
-        return True
+        if not index.isValid() or role != Qt.ItemDataRole.EditRole or index.column() != 0:
+            return False
+        ok, msg = self._store.rename_resource(index.row(), str(value))
+        if not ok:
+            self.rejected.emit(msg)
+        return ok
 
     def flags(self, index):
-        base = super().flags(index)
-        if index.column() == 0:
-            return base | Qt.ItemFlag.ItemIsEditable
-        return base  # colour edited via dialog
-
-    def resources(self) -> List[Resource]:
-        return list(self._data)
-
-    def add_resource(self):
-        idx = len(self._data)
-        default_color = RESOURCE_PALETTE[idx % len(RESOURCE_PALETTE)]
-        self.beginInsertRows(QModelIndex(), idx, idx)
-        self._data.append(Resource(id=f"Resource_{idx+1}", color=default_color))
-        self.endInsertRows()
-
-    def remove_resource(self, row: int):
-        if 0 <= row < len(self._data):
-            self.beginRemoveRows(QModelIndex(), row, row)
-            del self._data[row]
-            self.endRemoveRows()
-
-    def set_color(self, row: int, color: str):
-        if 0 <= row < len(self._data):
-            self._data[row].color = color
-            idx = self.index(row, 1)
-            self.dataChanged.emit(idx, idx)
+        base = Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
+        return base | Qt.ItemFlag.ItemIsEditable if index.column() == 0 else base
 
 
-# ---------------------------------------------------------------------------
-# Task table model
-# ---------------------------------------------------------------------------
-class TaskTableModel(QAbstractTableModel):
+class TaskTableModel(_StoreModel):
     COLUMNS = ["ID", "Name", "Resource", "Duration (s)", "FS Predecessors", "SS Predecessors"]
+    HEADER_TIPS = [
+        "Unique task ID",
+        "Description shown on the Gantt bar",
+        "Resource that performs this task (dropdown)",
+        "Duration in seconds",
+        "Finish-to-Start: this task starts after ALL of these finish (dropdown, multi-select)",
+        "Start-to-Start: this task starts no earlier than these start (dropdown, multi-select)",
+    ]
 
-    def __init__(self, tasks: List[Task], parent=None):
-        super().__init__(parent)
-        self._data: List[Task] = list(tasks)
+    def rowCount(self, _=QModelIndex()):
+        return len(self._store.tasks)
 
-    def rowCount(self, _=QModelIndex()): return len(self._data)
-    def columnCount(self, _=QModelIndex()): return len(self.COLUMNS)
+    def columnCount(self, _=QModelIndex()):
+        return len(self.COLUMNS)
 
     def headerData(self, section, orientation, role=Qt.ItemDataRole.DisplayRole):
-        if orientation == Qt.Orientation.Horizontal and role == Qt.ItemDataRole.DisplayRole:
-            return self.COLUMNS[section]
+        if orientation == Qt.Orientation.Horizontal:
+            if role == Qt.ItemDataRole.DisplayRole:
+                return self.COLUMNS[section]
+            if role == Qt.ItemDataRole.ToolTipRole:
+                return self.HEADER_TIPS[section]
+        return None
+
+    def _text(self, task, col):
+        return [task.id, task.name, task.resource, f"{task.duration:g}",
+                ", ".join(task.predecessors_fs), ", ".join(task.predecessors_ss)][col]
 
     def data(self, index, role=Qt.ItemDataRole.DisplayRole):
-        if not index.isValid(): return None
-        t = self._data[index.row()]
+        if not index.isValid():
+            return None
+        task = self._store.tasks[index.row()]
         col = index.column()
+        if role == Qt.ItemDataRole.EditRole:
+            return self._text(task, col)
         if role == Qt.ItemDataRole.DisplayRole:
-            return [
-                t.id, t.name, t.resource,
-                str(t.duration),
-                ", ".join(t.predecessors_fs),
-                ", ".join(t.predecessors_ss),
-            ][col]
-        if role == Qt.ItemDataRole.ForegroundRole:
-            return QBrush(QColor(WHITE))
+            if col == 2 and not task.resource:
+                return "\u26a0 unassigned"
+            return self._text(task, col)
+        if role == Qt.ItemDataRole.ForegroundRole and col == 2:
+            if task.resource not in self._store.resource_ids():
+                return _DANGER
+        if role == Qt.ItemDataRole.ToolTipRole:
+            if col == 2 and task.resource not in self._store.resource_ids():
+                return "This task has no valid resource, so it is not shown on the Gantt. Pick one from the dropdown."
+            return self._text(task, col) or None
         return None
 
     def setData(self, index, value, role=Qt.ItemDataRole.EditRole):
-        if not index.isValid() or role != Qt.ItemDataRole.EditRole: return False
-        t = self._data[index.row()]
-        col = index.column()
-        v = str(value).strip()
-        if col == 0: t.id = v
-        elif col == 1: t.name = v
-        elif col == 2: t.resource = v
+        if not index.isValid() or role != Qt.ItemDataRole.EditRole:
+            return False
+        row, col, st = index.row(), index.column(), self._store
+        text = str(value).strip()
+        ok, msg = True, ""
+        if col == 0:
+            ok, msg = st.rename_task(row, text)
+        elif col == 1:
+            st.set_task_name(row, text)
+        elif col == 2:
+            st.set_task_resource(row, text)
         elif col == 3:
-            try: t.duration = float(v)
-            except ValueError: return False
-        elif col == 4: t.predecessors_fs = [p.strip() for p in v.split(",") if p.strip()]
-        elif col == 5: t.predecessors_ss = [p.strip() for p in v.split(",") if p.strip()]
-        self.dataChanged.emit(index, index)
-        return True
+            ok, msg = st.set_task_duration(row, text)
+        elif col in (4, 5):
+            ids = [p.strip() for p in text.split(",") if p.strip()]
+            st.set_task_predecessors(row, "FS" if col == 4 else "SS", ids)
+        if not ok and msg:
+            self.rejected.emit(msg)
+        return ok
 
     def flags(self, index):
-        return super().flags(index) | Qt.ItemFlag.ItemIsEditable
-
-    def tasks(self) -> List[Task]:
-        return list(self._data)
-
-    def add_task(self):
-        idx = len(self._data)
-        self.beginInsertRows(QModelIndex(), idx, idx)
-        self._data.append(Task(id=f"Task_{idx+1}", name=f"Task {idx+1}", resource="", duration=5.0))
-        self.endInsertRows()
-
-    def remove_task(self, row: int):
-        if 0 <= row < len(self._data):
-            self.beginRemoveRows(QModelIndex(), row, row)
-            del self._data[row]
-            self.endRemoveRows()
-
-    def highlight_task(self, task_id: Optional[str]):
-        """Highlight the row matching task_id."""
-        pass  # visual feedback handled by selection on the view
+        return (Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEditable)
 
 
 # ---------------------------------------------------------------------------
-# Panel widgets
+# Panels
 # ---------------------------------------------------------------------------
 def _section_label(text: str) -> QLabel:
-    lbl = QLabel(text)
-    lbl.setStyleSheet(
-        "color: #B0BAC4; font-size: 9pt; font-weight: bold; "
-        "letter-spacing: 1px; text-transform: uppercase; padding: 6px 0 2px 0;"
-    )
+    lbl = QLabel(text.upper())
+    lbl.setObjectName("SectionLabel")
     return lbl
 
 
-def _small_btn(text: str, color: str = "#1A2E40") -> QPushButton:
+def _button(text: str, name: str = "") -> QPushButton:
     btn = QPushButton(text)
-    btn.setFixedHeight(26)
-    btn.setStyleSheet(
-        f"background:{color}; color:white; border:none; border-radius:3px;"
-        f"padding: 2px 10px; font-size:9pt;"
-    )
+    if name:
+        btn.setObjectName(name)
+    btn.setCursor(Qt.CursorShape.PointingHandCursor)
     return btn
+
+
+def _style_table(view: QTableView) -> None:
+    view.setAlternatingRowColors(True)
+    view.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+    view.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+    view.setEditTriggers(QAbstractItemView.EditTrigger.DoubleClicked
+                         | QAbstractItemView.EditTrigger.SelectedClicked
+                         | QAbstractItemView.EditTrigger.EditKeyPressed
+                         | QAbstractItemView.EditTrigger.AnyKeyPressed)
+    view.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+    view.setWordWrap(False)
+    view.setTextElideMode(Qt.TextElideMode.ElideRight)
+    view.verticalHeader().setVisible(False)
+    view.verticalHeader().setDefaultSectionSize(_ROW_H)
+    view.horizontalHeader().setStretchLastSection(True)
+    view.horizontalHeader().setHighlightSections(False)
+
+
+def _delete_shortcut(view: QTableView, slot) -> None:
+    sc = QShortcut(QKeySequence("Delete"), view)
+    sc.setContext(Qt.ShortcutContext.WidgetShortcut)
+    sc.activated.connect(slot)
 
 
 class ResourcePanel(QWidget):
     """Editor for the Resources list."""
-    changed = pyqtSignal()
+    message = pyqtSignal(str)
 
-    def __init__(self, resources: List[Resource], parent=None):
+    def __init__(self, store: ProjectStore, parent=None):
         super().__init__(parent)
-        self._model = ResourceTableModel(resources)
+        self._store = store
+        self._model = ResourceTableModel(store, self)
+        self._model.rejected.connect(self.message)
         self._build_ui()
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(4)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(6)
         layout.addWidget(_section_label("Resources"))
 
         self._view = QTableView()
         self._view.setModel(self._model)
-        self._view.setAlternatingRowColors(True)
-        self._view.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self._view.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        self._view.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
-        self._view.horizontalHeader().resizeSection(1, 70)
-        self._view.setItemDelegateForColumn(1, ColourSwatchDelegate())
+        _style_table(self._view)
+        hdr = self._view.horizontalHeader()
+        hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
+        hdr.resizeSection(1, 96)
+        self._view.setItemDelegateForColumn(1, ColourSwatchDelegate(self._view))
         self._view.doubleClicked.connect(self._on_double_click)
-        self._view.setFixedHeight(130)
-        layout.addWidget(self._view)
+        _delete_shortcut(self._view, self._remove)
+        layout.addWidget(self._view, stretch=1)
 
-        btn_row = QHBoxLayout()
-        btn_add = _small_btn("+ Add", "#1F4E78")
-        btn_rem = _small_btn("− Remove", "#5D2020")
+        row = QHBoxLayout()
+        row.setSpacing(6)
+        btn_add, btn_col, btn_rem = _button("+ Add", "addBtn"), _button("Colour\u2026"), _button("\u2212 Remove", "removeBtn")
         btn_add.clicked.connect(self._add)
+        btn_col.clicked.connect(self._pick_colour_for_current)
         btn_rem.clicked.connect(self._remove)
-        btn_row.addWidget(btn_add)
-        btn_row.addWidget(btn_rem)
-        btn_row.addStretch()
-        layout.addLayout(btn_row)
+        for b in (btn_add, btn_col, btn_rem):
+            row.addWidget(b)
+        row.addStretch()
+        layout.addLayout(row)
+
+    def _current_row(self) -> int:
+        idx = self._view.currentIndex()
+        return idx.row() if idx.isValid() else -1
 
     def _add(self):
-        self._model.add_resource()
-        self.changed.emit()
+        row = self._store.add_resource()
+        self._view.selectRow(row)
+        self._view.scrollTo(self._model.index(row, 0))
+        self.message.emit("Resource added \u2014 it is now available in every task's Resource dropdown.")
 
     def _remove(self):
-        idx = self._view.currentIndex()
-        if idx.isValid():
-            self._model.remove_resource(idx.row())
-            self.changed.emit()
+        row = self._current_row()
+        if row < 0:
+            return
+        n = self._store.tasks_using_resource(row)
+        if n:
+            rid = self._store.resources[row].id
+            reply = QMessageBox.question(
+                self, "Remove resource",
+                f"'{rid}' is used by {n} task(s). They will become unassigned.\n\nRemove it anyway?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel)
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+        self._store.remove_resource(row)
+        count = self._model.rowCount()
+        if count:
+            self._view.selectRow(min(row, count - 1))
 
     def _on_double_click(self, index: QModelIndex):
         if index.column() == 1:
-            cur = self._model.resources()[index.row()].color or "#FFFFFF"
-            color = QColorDialog.getColor(QColor(cur), self, "Pick Resource Color")
-            if color.isValid():
-                self._model.set_color(index.row(), color.name())
-                self.changed.emit()
+            self._pick_colour(index.row())
 
-    def resources(self) -> List[Resource]:
-        return self._model.resources()
+    def _pick_colour_for_current(self):
+        row = self._current_row()
+        if row >= 0:
+            self._pick_colour(row)
 
-    def set_resources(self, resources: List[Resource]):
-        self._model = ResourceTableModel(resources)
-        self._view.setModel(self._model)
+    def _pick_colour(self, row: int):
+        current = self._store.resources[row].color or "#FFFFFF"
+        color = QColorDialog.getColor(QColor(current), self, "Pick resource colour")
+        if color.isValid():
+            self._store.set_resource_color(row, color.name())
 
 
 class TaskPanel(QWidget):
     """Editor for the Tasks list."""
-    changed = pyqtSignal()
+    message = pyqtSignal(str)
+    task_selected = pyqtSignal(str)
 
-    def __init__(self, tasks: List[Task], parent=None):
+    def __init__(self, store: ProjectStore, parent=None):
         super().__init__(parent)
-        self._model = TaskTableModel(tasks)
+        self._store = store
+        self._model = TaskTableModel(store, self)
+        self._model.rejected.connect(self.message)
         self._build_ui()
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(4)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(6)
         layout.addWidget(_section_label("Tasks"))
 
         self._view = QTableView()
         self._view.setModel(self._model)
-        self._view.setAlternatingRowColors(True)
-        self._view.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        _style_table(self._view)
         hdr = self._view.horizontalHeader()
         hdr.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-        hdr.resizeSection(0, 110)
-        hdr.resizeSection(1, 150)
-        hdr.resizeSection(2, 100)
-        hdr.resizeSection(3, 80)
-        hdr.resizeSection(4, 120)
-        hdr.resizeSection(5, 120)
-        self._view.verticalHeader().setVisible(False)
-        layout.addWidget(self._view)
+        for col, width in enumerate((90, 160, 120, 90, 130, 130)):
+            hdr.resizeSection(col, width)
+        self._view.setItemDelegateForColumn(2, ResourceComboDelegate(self._store, self._view))
+        self._view.setItemDelegateForColumn(4, PredecessorDelegate(self._store, self._view))
+        self._view.setItemDelegateForColumn(5, PredecessorDelegate(self._store, self._view))
+        self._view.selectionModel().currentRowChanged.connect(self._on_current_row)
+        _delete_shortcut(self._view, self._remove)
+        layout.addWidget(self._view, stretch=1)
 
-        btn_row = QHBoxLayout()
-        btn_add = _small_btn("+ Add Task", "#1F4E78")
-        btn_rem = _small_btn("− Remove", "#5D2020")
+        row = QHBoxLayout()
+        row.setSpacing(6)
+        btn_add, btn_rem = _button("+ Add Task", "addBtn"), _button("\u2212 Remove", "removeBtn")
         btn_add.clicked.connect(self._add)
         btn_rem.clicked.connect(self._remove)
-        btn_row.addWidget(btn_add)
-        btn_row.addWidget(btn_rem)
-        btn_row.addStretch()
-        layout.addLayout(btn_row)
+        row.addWidget(btn_add)
+        row.addWidget(btn_rem)
+        row.addStretch()
+        layout.addLayout(row)
+
+    def _on_current_row(self, current: QModelIndex, _previous: QModelIndex):
+        if current.isValid() and current.row() < len(self._store.tasks):
+            self.task_selected.emit(self._store.tasks[current.row()].id)
 
     def _add(self):
-        self._model.add_task()
-        self.changed.emit()
+        row = self._store.add_task()
+        self._view.selectRow(row)
+        self._view.scrollTo(self._model.index(row, 0))
 
     def _remove(self):
         idx = self._view.currentIndex()
-        if idx.isValid():
-            self._model.remove_task(idx.row())
-            self.changed.emit()
-
-    def tasks(self) -> List[Task]:
-        return self._model.tasks()
-
-    def set_tasks(self, tasks: List[Task]):
-        self._model = TaskTableModel(tasks)
-        self._view.setModel(self._model)
+        if not idx.isValid():
+            return
+        row = idx.row()
+        self._store.remove_task(row)
+        count = self._model.rowCount()
+        if count:
+            self._view.selectRow(min(row, count - 1))
 
     def select_task(self, task_id: Optional[str]):
-        for row in range(self._model.rowCount()):
-            if self._model.tasks()[row].id == task_id:
-                self._view.selectRow(row)
-                return
+        row = self._store.row_of_task(task_id) if task_id else -1
+        if row >= 0:
+            self._view.selectRow(row)
+            self._view.scrollTo(self._model.index(row, 0))

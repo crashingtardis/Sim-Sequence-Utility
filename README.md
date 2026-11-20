@@ -1,8 +1,8 @@
 # Comau Sim-Sequence Studio
 
-> **v0.8.0** — Native PyQt6 desktop application for automation sequence scheduling, interactive Gantt visualization, and executable packaging.
+> **v0.9.0** — Native PyQt6 desktop application for automation sequence scheduling, interactive Gantt visualization, and executable packaging.
 
-A Python-based engineering tool for defining, scheduling, and visualizing automation sequences. Supports a native `.cseq` file format, bidirectional Excel import/export (including original Honda sequence sheets), an interactive dark-themed desktop UI with Comau branding, live drag-to-resize duration, interactive drag-and-drop dependency linking, and standalone `.exe` packaging.
+A Python-based engineering tool for defining, scheduling, and visualizing automation sequences. Supports a native `.cseq` file format, bidirectional Excel import/export, an interactive desktop UI with Comau branding and a dark / light theme toggle, live drag-to-resize duration, drag-from-handle dependency linking, and standalone `.exe` packaging.
 
 ---
 
@@ -12,13 +12,14 @@ A Python-based engineering tool for defining, scheduling, and visualizing automa
 
 ```bash
 # 1. Install dependencies
-pip install -r requirements.txt
+pip install -r requirements.txt        # runtime
+pip install -r requirements-dev.txt    # + pytest, pyinstaller, pillow (to run tests / build the .exe)
 
 # 2. Launch the studio
 python studio_app.py
 
 # Open a sequence file directly:
-python studio_app.py inputs/honda_weld_sequence.cseq
+python studio_app.py inputs/sample_weld_sequence.cseq
 
 # Or import from an Excel template:
 python studio_app.py inputs/sequence_template.xlsx
@@ -46,7 +47,7 @@ python main.py inputs/sequence_template.xlsx
 python main.py inputs/example_sequence.yaml
 
 # From a native .cseq file
-python main.py inputs/honda_weld_sequence.cseq
+python main.py inputs/sample_weld_sequence.cseq
 ```
 
 ---
@@ -57,17 +58,18 @@ python main.py inputs/honda_weld_sequence.cseq
 Sim-Sequence-Utility/
 │
 ├── studio_app.py              # ← Desktop app entry point
-├── build_exe.py               # ← One-click PyInstaller build script (.exe + .ico + .reg)
-├── SimSequenceStudio.spec     # ← PyInstaller build specification
-├── register_cseq.reg          # ← Windows Registry file association for .cseq
+├── build_exe.py               # ← One-click PyInstaller build script (.exe + .ico + .reg; spec/.reg are generated, git-ignored)
 │
 ├── studio/                    # ← PyQt6 desktop app package
-│   ├── main_window.py         #   QMainWindow — layout, menus, toolbar, scheduler thread
-│   ├── gantt_canvas.py        #   Interactive Gantt (drag-resize, dependency links, arrows)
-│   ├── task_panel.py          #   Editable Resources + Tasks tables
+│   ├── main_window.py         #   QMainWindow — layout, menus, toolbar, theme toggle, auto-run
+│   ├── project_store.py       #   ProjectStore — single source of truth; panels/dropdowns/Gantt are views
+│   ├── task_panel.py          #   Resources + Tasks tables, dropdown delegates (resource / predecessors)
+│   ├── gantt_canvas.py        #   Interactive Gantt (link handles, selectable links, sticky labels, lanes)
+│   ├── gantt_toolbar.py       #   Zoom / Fit buttons + link legend (wraps when narrow)
+│   ├── kpi_bar.py             #   KPI cards + balance badge (wraps when narrow)
 │   ├── settings_panel.py      #   Project settings form
-│   ├── kpi_bar.py             #   Live KPI metric cards & dependency legend
-│   └── theme.py               #   Comau dark-mode stylesheet & brand palette
+│   ├── flow_layout.py         #   Wrapping layout used by the KPI bar and Gantt toolbar
+│   └── theme.py               #   Theme dataclass, DARK / LIGHT palettes, stylesheet generator
 │
 ├── main.py                    # CLI entry point (.cseq / .xlsx / .yaml)
 ├── main_embedded.py           # Entry point invoked by standalone .xlsm macro
@@ -76,8 +78,7 @@ Sim-Sequence-Utility/
 ├── requirements.txt
 │
 ├── inputs/
-│   ├── honda_weld_sequence.cseq   # Sample native sequence file (17 tasks, 4 resources)
-│   ├── honda_seq_dev_111826.xlsx  # Original Honda weld sequence Excel sheet (22 tasks, 6 resources)
+│   ├── sample_weld_sequence.cseq  # Sample native sequence file (17 tasks, 4 resources)
 │   ├── sequence_template.xlsx     # Standard 3-sheet Excel input template
 │   └── example_sequence.yaml      # Sample YAML input
 │
@@ -88,8 +89,10 @@ Sim-Sequence-Utility/
 │   ├── __init__.py            #   Package version (0.8.0)
 │   ├── models.py              #   Data classes: Task, Resource, GlobalSettings, SequenceModel
 │   ├── loader.py              #   YAML → SequenceModel
-│   ├── excel_loader.py        #   Excel template & Honda sheet → SequenceModel parser
+│   ├── excel_loader.py        #   Excel template & timing-matrix sheet → SequenceModel parser
 │   ├── cseq_io.py             #   .cseq (JSON) save/load
+│   ├── graph_ops.py           #   Pure edit rules: link validation, cycle check, renames, lane layout
+│   ├── sample_data.py         #   Built-in sample sequence (Help menu)
 │   ├── scheduler.py           #   NetworkX DAG scheduler (FS + SS dependencies)
 │   ├── reporter.py            #   XlsxWriter Excel report & Gantt generator
 │   ├── embedder.py            #   Packs Python source for Excel embedding
@@ -102,7 +105,8 @@ Sim-Sequence-Utility/
 └── tests/
     ├── test_cseq_io.py        # Tests for .cseq file format serializer/deserializer
     ├── test_loader.py
-    ├── test_excel_loader.py   # Tests for 3-sheet and Honda sequence sheet parsing
+    ├── test_excel_loader.py   # Tests for 3-sheet and timing-matrix sheet parsing
+    ├── test_graph_ops.py      # Tests for link validation, renames, lane layout
     ├── test_embedder.py
     └── test_scheduler.py
 ```
@@ -113,21 +117,21 @@ Sim-Sequence-Utility/
 
 | Feature | Detail |
 |---|---|
-| **Interactive Gantt Canvas** | Hardware-accelerated `QGraphicsScene` with coloured task bars, dashed Comau-Red takt marker, hover tooltips |
-| **Drag-to-Resize Duration** | Hover over the right edge of any task bar (cursor changes to `↔`) and drag horizontally to alter duration; live DAG recalculation occurs on mouse release |
-| **Dependency Arrows** | Visual elbow paths with directional arrowheads: **Finish-to-Start (FS)** as solid grey arrows, **Start-to-Start (SS)** as dashed amber arrows |
-| **Drag-and-Drop Dependency Linking** | Right-click and drag from Task A to Task B to draw an elastic connection line; release to choose FS or SS dependency via instant popup |
-| **Interactive Dependency Removal** | Right-click any dependency arrow in the Gantt to delete it; hovering over arrows highlights them in blue |
-| **Zoom & Pan** | `Ctrl+Scroll` to zoom (4 px/s to 80 px/s), scroll bars or middle-mouse drag to pan |
-| **Click-to-Select** | Click any task bar to inspect details and automatically focus/select the row in the Tasks table |
-| **Live KPI Bar** | Instant calculation of Total Cycle Time, Takt Time, Utilization %, Task & Resource counts, and `✓ BALANCED` / `⚠ OVER TAKT` badge |
-| **Dependency Legend** | Visual guide in the KPI bar distinguishing solid FS from dashed SS arrows |
-| **Resource & Task Editors** | Inline table editors for ID, Name, Resource, Duration, and comma-separated Predecessors; double-click color to open color picker |
-| **Load Sample Honda Sequence** | Accessible directly from **Help -> Load Sample Honda Sequence (from Excel)**; immediately loads and visualizes the full 22-task Honda dataset |
-| **Background Scheduling** | Scheduling and DAG analysis run asynchronously in a dedicated `QThread`, ensuring zero UI lockup |
+| **Interactive Gantt Canvas** | `QGraphicsScene` with coloured task bars, dashed Comau-Red takt marker, hover tooltips. Resource column and time header stay pinned while scrolling |
+| **Drag-to-Create Links** | Every bar has two handles: drag the **blue right handle** onto another bar for a **Finish-to-Start (FS)** link, or the **amber left handle** for a **Start-to-Start (SS)** link. The target bar turns green (valid) or red (self-link, duplicate, or circular) while dragging; `Esc` cancels. No menus |
+| **Easy Link Removal** | Links have a wide click target. Click one to select it, then press `Delete` or click its red ✕ badge. Right-click → Remove also works |
+| **Dropdown-driven Editing** | Task **Resource** is a dropdown of all resources; **FS / SS Predecessors** are multi-select dropdowns of all tasks that can legally be predecessors (never itself or anything that would create a cycle). New resources/tasks appear in them immediately; renames propagate; removing a resource unassigns its tasks |
+| **Drag-to-Resize Duration** | Drag the right edge of a bar; snaps to 0.1 s and reschedules on release |
+| **Overlap-free Layout** | Parallel tasks on one resource stack in sub-lanes; bar text is elided to the bar; time ticks adapt to zoom; tasks with no valid resource show in an "Unassigned" row instead of vanishing |
+| **Fit & Zoom** | `Fit` fits the sequence to the window and stays fitted as you resize; `Ctrl+Scroll` / buttons zoom manually (0.5–120 px/s) |
+| **Resizable Panes** | Splitter between the editor pane and Gantt (no width cap); KPI bar and Gantt toolbar wrap instead of overlapping on narrow windows; window geometry and splitter position are remembered |
+| **Dark / Light Theme** | `View → Dark mode` (`Ctrl+Shift+D`) or toolbar toggle; choice is remembered |
+| **Auto-run** | Schedule re-runs ~0.3 s after any edit (toggle in the Simulation menu); `F5` runs immediately |
+| **Live KPI Bar** | Cycle Time, Takt Time, Utilisation %, Task & Resource counts, `✓ BALANCED` / `⚠ OVER TAKT` badge |
+| **Load Sample Sequence** | `Help → Load Sample Sequence (Body-Shop Cell)` loads the built-in 22-task, 6-resource example |
 | **Native `.cseq` File Format** | Clean, version-controlled JSON format for sequences |
-| **Bidirectional Excel Integration** | Import both 3-sheet templates and original Honda timing sheets; export presentation-ready Excel reports with drill-downs |
-| **Comau Brand Theme** | Professional industrial dark palette (Executive Navy `#0B2341`, Comau Red `#C8102E`, Slate `#1A2E40`) |
+| **Bidirectional Excel Integration** | Import 3-sheet templates and timing-matrix sheets; export presentation-ready Excel reports with drill-downs |
+| **Comau Brand Theme** | Executive Navy `#0B2341`, Comau Red `#C8102E`, in both dark and light variants |
 
 ### Keyboard Shortcuts
 
@@ -140,7 +144,11 @@ Sim-Sequence-Utility/
 | `F5` | Run simulation |
 | `Ctrl+=` | Zoom in |
 | `Ctrl+-` | Zoom out |
-| `Ctrl+0` | Reset zoom |
+| `Ctrl+9` | Fit to window |
+| `Ctrl+0` | Reset zoom (100%) |
+| `Ctrl+Shift+D` | Toggle dark / light mode |
+| `Delete` | Remove selected link (Gantt) or selected row (Resources / Tasks tables) |
+| `Esc` | Cancel a link drag |
 | `Ctrl+Q` | Quit |
 
 ---
@@ -244,7 +252,7 @@ pytest tests/
 python -m pytest tests/
 ```
 
-All 21 unit tests validate loaders (including 3-sheet templates and original Honda sheets), DAG scheduling, Excel output, embedding, and `.cseq` serialization.
+The suite covers loaders (3-sheet templates and timing-matrix sheets), DAG scheduling, embedding, `.cseq` serialization and the pure graph-editing rules in `sim_sequence/graph_ops.py` (link validation, cycle detection, renames, lane layout). The Qt widgets themselves are not covered by automated tests.
 
 ---
 
@@ -253,14 +261,13 @@ All 21 unit tests validate loaders (including 3-sheet templates and original Hon
 | Package | Purpose |
 |---|---|
 | `PyQt6` | Desktop GUI framework |
-| `PyQt6-Charts` | Charting components |
 | `networkx` | DAG scheduling engine |
 | `XlsxWriter` | Excel report generation |
 | `openpyxl` | Excel input template reading |
 | `PyYAML` | YAML input format |
-| `pillow` | Image handling & `.ico` generation |
-| `pyinstaller` | Standalone `.exe` packaging |
-| `pywin32` | COM automation for `.xlsm` generation |
+| `pywin32` | COM automation for `.xlsm` generation (Windows only) |
+
+Dev-only (`requirements-dev.txt`): `pytest`, `pyinstaller` (standalone `.exe`), `pillow` (`.ico` generation).
 
 ---
 

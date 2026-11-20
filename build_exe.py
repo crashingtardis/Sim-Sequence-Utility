@@ -63,8 +63,8 @@ def _run_pyinstaller(icon_path: str | None):
         "--workpath", str(BUILD_DIR),
         "--specpath", str(ROOT),
         # Data files bundled into the exe
-        "--add-data", f"{ROOT / 'resources' / 'Logo-COMAU.png'};resources",
-        "--add-data", f"{ROOT / 'inputs' / 'sample_weld_sequence.cseq'};inputs",
+        "--add-data", f"{ROOT / 'resources' / 'Logo-COMAU.png'}{os.pathsep}resources",
+        "--add-data", f"{ROOT / 'inputs' / 'sample_weld_sequence.cseq'}{os.pathsep}inputs",
         # Hidden imports PyInstaller may miss
         "--hidden-import", "PyQt6.sip",
         "--hidden-import", "networkx.algorithms",

@@ -1,0 +1,25 @@
+Windows Registry Editor Version 5.00
+
+; Associate .cseq files with Comau Sim-Sequence Studio
+; Double-click any .cseq file to open it directly in the studio.
+;
+; Instructions:
+;   1. Build the exe first: python build_exe.py
+;   2. Double-click register_cseq.reg and confirm the UAC prompt.
+
+[HKEY_CLASSES_ROOT\.cseq]
+@="ComauSimSequence"
+"Content Type"="application/x-comau-sequence"
+
+[HKEY_CLASSES_ROOT\ComauSimSequence]
+@="Comau Sequence File"
+
+[HKEY_CLASSES_ROOT\ComauSimSequence\DefaultIcon]
+@="D:\\Users\\moroa\\Code\\Sim-Sequence-Utility\\dist\\SimSequenceStudio.exe,0"
+
+[HKEY_CLASSES_ROOT\ComauSimSequence\shell\open\command]
+@="\"D:\\Users\\moroa\\Code\\Sim-Sequence-Utility\\dist\\SimSequenceStudio.exe\" \"%1\""
+
+[HKEY_CLASSES_ROOT\ComauSimSequence\shell\open]
+@="Open in Sim-Sequence Studio"
+"Icon"="D:\\Users\\moroa\\Code\\Sim-Sequence-Utility\\dist\\SimSequenceStudio.exe,0"
